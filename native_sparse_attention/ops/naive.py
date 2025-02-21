@@ -12,6 +12,7 @@ def naive_nsa(
     k: torch.Tensor,
     v: torch.Tensor,
     indices: torch.LongTensor,
+    s: torch.LongTensor,
     block_size: int = 64,
     scale: Optional[float] = None,
     head_first: bool = False,
@@ -28,7 +29,9 @@ def naive_nsa(
             values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
         indices (torch.LongTensor):
             Block indices of shape `[B, T, H, S]` if `head_first=True` else `[B, T, H, S]`.
-            `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
+            `S` is the maximum number of selected blocks for each query token, which is set to 16 in the paper.
+        s (torch.LongTensor):
+            Block counts of shape `[B, T, H]` if `head_first=True` else `[B, T, H]`.
         block_size (int):
             Selected block size. Default: 64.
         scale (Optional[int]):
@@ -51,11 +54,15 @@ def naive_nsa(
             raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
     if head_first:
         q, k, v, indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, indices))
+        s = rearrange(s, 'b h t -> b t h')
 
     dtype = q.dtype
     G = q.shape[2] // k.shape[2]
     BS = block_size
+    S = indices.shape[-1]
     k, v, indices = (repeat(x, 'b t h d -> b t (h g) d', g=G) for x in (k, v, indices))
+    s = repeat(s, 'b t h -> b t (h g)', g=G)
+    c = torch.arange(S).repeat_interleave(BS).unsqueeze(1).expand(-1, q.shape[2]).to(q.device)
     q, k, v = map(lambda x: x.float(), (q, k, v))
 
     o = torch.zeros_like(v)
@@ -67,10 +74,10 @@ def naive_nsa(
 
     for i in range(len(cu_seqlens) - 1):
         if not varlen:
-            q_b, k_b, v_b, i_b = q[i], k[i], v[i], indices[i]
+            q_b, k_b, v_b, i_b, s_b = q[i], k[i], v[i], indices[i], s[i]
         else:
             T = cu_seqlens[i+1] - cu_seqlens[i]
-            q_b, k_b, v_b, i_b = map(lambda x: x[0][cu_seqlens[i]:cu_seqlens[i+1]], (q, k, v, indices))
+            q_b, k_b, v_b, i_b, s_b = map(lambda x: x[0][cu_seqlens[i]:cu_seqlens[i+1]], (q, k, v, indices, s))
 
         i_b = i_b.unsqueeze(-1) * BS + i_b.new_tensor(range(BS))
         # [T, S*BS, HQ]
@@ -80,10 +87,12 @@ def naive_nsa(
             q_i = q_b[i_q] * scale
             # [S*BS, HQ]
             i_i = i_b[i_q]
+            # [1, HQ]
+            s_i = s_b[i_q]
             # [S*BS, HQ, -1]
             k_i, v_i = map(lambda x: x.gather(0, i_i.clamp(0, T-1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])), (k_b, v_b))
             # [S*BS, HQ]
-            attn = torch.einsum('h d, n h d -> n h', q_i, k_i).masked_fill(i_i > i_q, float('-inf')).softmax(0)
+            attn = torch.einsum('h d, n h d -> n h', q_i, k_i).masked_fill((i_i > i_q) | (c >= s_i), float('-inf')).softmax(0)
             if not varlen:
                 o[i, i_q] = torch.einsum('n h, n h v -> h v', attn, v_i)
             else:

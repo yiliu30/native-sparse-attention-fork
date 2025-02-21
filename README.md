@@ -12,6 +12,10 @@ Efficient Triton implementations for [Native Sparse Attention: Hardware-Aligned 
   <img width="400" alt="image" src="https://github.com/user-attachments/assets/ace2920d-3894-4556-8039-b70861742551">
 </div>
 
+## News
+
+- [2024/02/21] We support a variable number of selected blocks for queries across different positions and batches.
+
 ## Usage
 
 ```py
@@ -24,6 +28,7 @@ k = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
 v = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
 # randomly generated block indices
 indices = torch.full((B, T, H, S), T, dtype=torch.long, device='cuda')
+s = torch.randint(1, S + 1, (B, T, H), device='cuda')
 for b in range(B):
     for t in range(T):
         for h in range(H):
@@ -36,6 +41,7 @@ parallel_nsa(
   k=k,
   v=v,
   indices=indices,
+  s=s,
   block_size=block_size
 )
 
@@ -53,6 +59,7 @@ k = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
 v = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
 
 indices = torch.full((1, T, H, S), T, dtype=torch.long, device='cuda')
+s = torch.randint(1, S + 1, (B, T, H), device='cuda')
 seq_indices = prepare_token_indices(offsets).tolist()
 for i in range(T):
     _, t = seq_indices[i]
@@ -65,6 +72,7 @@ parallel_nsa(
     k=k,
     v=v,
     indices=indices,
+    s=s,
     block_size=block_size,
     cu_seqlens=offsets
 )

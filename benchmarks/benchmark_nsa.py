@@ -38,9 +38,10 @@ def benchmark(T, provider):
     q = torch.randn(B, T, HQ, D, device=device, requires_grad=requires_grad, dtype=dtype)
     k = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
     v = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+    s = torch.randint(1, S + 1, (B, T, H), device=device)
     do = torch.ones_like(q, dtype=dtype)
 
-    indices = torch.full((B, T, H, S), T, dtype=torch.long, device='cuda')
+    indices = torch.full((B, T, H, S), T, dtype=torch.long, device=device)
     for b in range(B):
         for t in range(T):
             for h in range(H):
@@ -52,12 +53,12 @@ def benchmark(T, provider):
     results = 0, 0, 0
     if provider == 'nsa':
         results = triton.testing.do_bench(
-            lambda: parallel_nsa(q, k, v, indices, block_size),
+            lambda: parallel_nsa(q, k, v, indices, s, block_size),
             quantiles=quantiles
         )
     elif provider == 'nsa_bwd':
         results = triton.testing.do_bench(
-            lambda: parallel_nsa(q, k, v, indices, block_size).backward(do),
+            lambda: parallel_nsa(q, k, v, indices, s, block_size).backward(do),
             quantiles=quantiles
         )
     elif provider == 'flash':
