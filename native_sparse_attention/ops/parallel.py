@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import triton
@@ -11,6 +11,120 @@ from einops import rearrange
 from fla.ops.common.utils import (prepare_chunk_indices, prepare_lens,
                                   prepare_token_indices)
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from native_sparse_attention.ops.utils import argsort
+
+
+@triton.heuristics({
+    'USE_OFFSETS': lambda args: args['offsets'] is not None
+})
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in [1, 2, 4, 8, 16]
+    ],
+    key=['BS', 'BK'],
+)
+@triton.jit
+def parallel_nsa_kernel_compression(
+    q,
+    k,
+    scale,
+    block_indices,
+    offsets,
+    token_indices,
+    T,
+    H: tl.constexpr,
+    HQ: tl.constexpr,
+    G: tl.constexpr,
+    K: tl.constexpr,
+    S: tl.constexpr,
+    BS: tl.constexpr,
+    BK: tl.constexpr,
+    USE_OFFSETS: tl.constexpr,
+):
+    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_b, i_h = i_bh // H, i_bh % H
+
+    if USE_OFFSETS:
+        i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        T = eos - bos
+    else:
+        bos, eos = i_b * T, i_b * T + T
+
+    k += (bos * H + i_h) * K
+    block_indices += (bos + i_t) * H*S + i_h * S
+
+    p_q = tl.make_block_ptr(q + (bos + i_t) * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
+
+    # the Q block is kept in the shared memory throughout the whole kernel
+    # [G, BK]
+    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_q = (b_q * scale).to(b_q.dtype)
+
+    C = tl.cdiv(T, BS)
+    ################################
+    # 1. lse computation
+    ################################
+    # max scores for the current block
+    b_m = tl.full([G], float('-inf'), dtype=tl.float32)
+    # lse = log(acc) + m
+    b_acc = tl.zeros([G], dtype=tl.float32)
+    for i_s in range(0, tl.cdiv(i_t, BS), BS):
+        p_k = tl.make_block_ptr(k, (K, C), (1, H*K), (0, i_s), (BK, BS), (0, 1))
+        # [BK, BS]
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+        # [G, BS]
+        b_s = tl.dot(b_q, b_k)
+        b_s = tl.where((i_t >= (i_s + tl.arange(0, BS)))[None, :], b_s, float('-inf'))
+
+        # [G]
+        b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
+        b_r = tl.exp(b_mp - b_m)
+        # [G, BS]
+        b_p = tl.exp(b_s - b_m[:, None])
+        # [G]
+        b_acc = b_acc * b_r + tl.sum(b_p, 1)
+
+        b_mp = b_m
+    # [G]
+    b_lse = b_m + tl.log(b_acc)
+
+    ################################
+    # 2. topk selection
+    ################################
+    # [BS]
+    b_i = tl.full([BS], float('-inf'), dtype=tl.float32)
+    o_i = tl.zeros([BS], dtype=tl.int32)
+    m_i = 1 - tl.arange(0, 2).to(tl.float32)
+    for i_s in range(0, tl.cdiv(i_t, BS), BS):
+        o_s = i_s + tl.arange(0, BS)
+
+        p_k = tl.make_block_ptr(k, (K, C), (1, H*K), (0, i_s), (BK, BS), (0, 1))
+        # [BK, BS]
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+        # [G, BS]
+        b_s = tl.dot(b_q, b_k)
+        b_s = tl.where((i_t >= o_s * BS)[None, :], b_s, float('-inf'))
+
+        # [G, BS]
+        b_p = tl.exp(b_s - b_lse[:, None])
+        # the importance scores of the current block
+        # [BS]
+        b_i, b_ip = tl.sum(b_p, 0), b_i
+
+        b_i2, o_i2 = argsort(
+            x=tl.reshape(m_i[:, None] * b_ip + (1 - m_i)[:, None] * b_i, [1, 2 * BS]),
+            ids=tl.reshape(m_i[:, None] * o_i + (1 - m_i)[:, None] * o_s, [1, 2 * BS]).to(tl.int32),
+            dim=1,
+            descending=True
+        )
+        b_i = tl.sum(m_i[:, None] * tl.reshape(b_i2, [2, BS]), 0)
+        o_i = tl.sum(m_i[:, None] * tl.reshape(o_i2, [2, BS]), 0).to(tl.int32)
+
+    m_top = (tl.arange(0, BS // S) == 0).to(tl.float32)
+    b_top = tl.sum(m_top[:, None] * tl.reshape(o_i, [BS // S, S]), 0)
+    tl.store(block_indices + tl.arange(0, S), b_top.to(block_indices.dtype.element_ty))
 
 
 @triton.heuristics({
@@ -356,12 +470,51 @@ def parallel_nsa_bwd_kernel_dkv(
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
 
+def parallel_nsa_compression(
+    q: torch.Tensor,
+    k_cmp: torch.Tensor,
+    block_counts: Union[torch.LongTensor, int],
+    block_size: int,
+    scale: float,
+    offsets: Optional[torch.LongTensor] = None,
+    token_indices: Optional[torch.LongTensor] = None,
+) -> torch.LongTensor:
+    B, T, HQ, K = q.shape
+    H = k_cmp.shape[2]
+    G = HQ // H
+    S = block_counts if isinstance(block_counts, int) else triton.next_power_of_2(block_counts.max().item())
+    BS = block_size
+    BK = triton.next_power_of_2(K)
+
+    grid = (T, B * H)
+    block_indices = torch.empty(B, T, H, S, dtype=torch.long, device=q.device)
+
+    parallel_nsa_kernel_compression[grid](
+        q=q,
+        k=k_cmp,
+        scale=scale,
+        block_indices=block_indices,
+        offsets=offsets,
+        token_indices=token_indices,
+        T=T,
+        H=H,
+        HQ=HQ,
+        G=G,
+        K=K,
+        S=S,
+        BS=BS,
+        BK=BK
+    )
+
+    return block_indices
+
+
 def parallel_nsa_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    block_indices: torch.Tensor,
-    block_counts: torch.Tensor,
+    block_indices: torch.LongTensor,
+    block_counts: torch.LongTensor,
     block_size: int,
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
@@ -396,10 +549,10 @@ def parallel_nsa_fwd(
         block_counts=block_counts,
         offsets=offsets,
         token_indices=token_indices,
+        T=T,
         H=H,
         HQ=HQ,
         G=G,
-        T=T,
         K=K,
         V=V,
         S=S,
@@ -651,6 +804,66 @@ def parallel_nsa(
     if head_first:
         q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, block_indices))
         block_counts = rearrange(block_counts, 'b h t -> b t h')
+    o = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, scale, cu_seqlens)
+    if head_first:
+        o = rearrange(o, 'b t h d -> b h t d')
+    return o
+
+
+def parallel_nsa_with_compression(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    k_cmp: torch.Tensor,
+    block_counts: Union[torch.LongTensor, int],
+    block_size: int = 64,
+    scale: Optional[float] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    head_first: bool = False
+) -> torch.Tensor:
+    r"""
+    Args:
+        q (torch.Tensor):
+            queries of shape `[B, T, HQ, K]` if `head_first=False` else `[B, HQ, T, K]`.
+        k (torch.Tensor):
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16.
+        v (torch.Tensor):
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+        k_cmp (torch.Tensor):
+            Compressed keys representations of shape `[B, C, H, K]` if `head_first=False` else `[B, H, C, K]`.
+            `C` is the number of compression blocks.
+            Here we assume that the compression block size equals to `block_size`.
+        block_counts (Optional[Union[torch.LongTensor, int]]):
+            Number of selected blocks for each token.
+            If a tensor is provided, with shape `[B, T, H]` if `head_first=True` else `[B, T, H]`,
+            each token can select the same number of blocks.
+        block_size (int):
+            Selected block size. Default: 64.
+        scale (Optional[int]):
+            Scale factor for attention scores.
+            If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
+        head_first (Optional[bool]):
+            Whether the inputs are in the head-first format. Default: `False`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
+
+    Returns:
+        o (torch.Tensor):
+            Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
+    """
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
+    if cu_seqlens is not None:
+        assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
+    if head_first:
+        q, k, v, k_cmp = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, k_cmp))
+        if not isinstance(block_counts, int):
+            block_counts = rearrange(block_counts, 'b h t -> b t h')
+
+    token_indices = prepare_token_indices(cu_seqlens) if cu_seqlens is not None else None
+    block_indices = parallel_nsa_compression(q, k_cmp, block_size, scale, cu_seqlens, token_indices)
     o = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, scale, cu_seqlens)
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')
