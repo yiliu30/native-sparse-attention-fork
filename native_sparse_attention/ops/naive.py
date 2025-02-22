@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
+from typing import Optional, Union
 
 import torch
+import triton
 from einops import rearrange, repeat
 
 
@@ -104,3 +105,96 @@ def naive_nsa(
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')
     return o.to(dtype)
+
+
+def naive_nsa_compression(
+    q: torch.Tensor,
+    k_cmp: torch.Tensor,
+    block_counts: Union[torch.LongTensor, int],
+    block_size: int,
+    scale: float,
+) -> torch.LongTensor:
+    B, T, C = q.shape[0], q.shape[1], k_cmp.shape[1]
+    H, HQ = k_cmp.shape[2], q.shape[2]
+    G = HQ//H
+    BS = block_size
+    S = block_counts if isinstance(block_counts, int) else triton.next_power_of_2(block_counts.max().item())
+    k_cmp = repeat(k_cmp, 'b c h d -> b c (h g) d', g=G)
+    q, k_cmp = map(lambda x: x.float(), (q, k_cmp))
+
+    mask = (torch.arange(T)[:, None]//BS < torch.arange(C)[None, :]).to(q.device)
+    attn = torch.einsum('bqhd,bkhd->bhqk', q*scale, k_cmp)
+    attn = attn.masked_fill(mask, float('-inf')).softmax(-1)
+    attn = attn.view(B, H, G, T, -1).sum(2)
+    block_indices = attn.topk(S, -1)[1]
+
+    block_indices = block_indices.masked_fill(block_indices > (block_indices.new_tensor(range(T))[:, None]//BS), 0)
+    block_indices = block_indices.transpose(1, 2)
+    return block_indices
+
+
+def naive_nsa_with_compression(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    k_cmp: torch.Tensor,
+    block_counts: Union[torch.LongTensor, int],
+    block_size: int = 64,
+    scale: Optional[float] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    head_first: bool = False
+) -> torch.Tensor:
+    r"""
+    Args:
+        q (torch.Tensor):
+            queries of shape `[B, T, HQ, K]` if `head_first=False` else `[B, HQ, T, K]`.
+        k (torch.Tensor):
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16.
+        v (torch.Tensor):
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+        k_cmp (torch.Tensor):
+            Compressed keys representations of shape `[B, C, H, K]` if `head_first=False` else `[B, H, C, K]`.
+            `C` is the number of compression blocks.
+            Here we assume that the compression block size equals to `block_size`.
+        block_counts (Optional[Union[torch.LongTensor, int]]):
+            Number of selected blocks for each token.
+            If a tensor is provided, with shape `[B, T, H]` if `head_first=True` else `[B, T, H]`,
+            each token can select the same number of blocks.
+        block_size (int):
+            Selected block size. Default: 64.
+        scale (Optional[int]):
+            Scale factor for attention scores.
+            If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
+        head_first (Optional[bool]):
+            Whether the inputs are in the head-first format. Default: `False`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
+
+    Returns:
+        o (torch.Tensor):
+            Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
+    """
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
+    if cu_seqlens is not None:
+        raise NotImplementedError("Variable-length mode is not supported for naive NSA with compression")
+    if head_first:
+        q, k, v, k_cmp = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, k_cmp))
+        if not isinstance(block_counts, int):
+            block_counts = rearrange(block_counts, 'b h t -> b t h')
+
+    block_indices = naive_nsa_compression(q, k_cmp, block_counts, block_size, scale)
+    o = naive_nsa(
+        q=q,
+        k=k,
+        v=v,
+        block_indices=block_indices,
+        block_counts=block_counts,
+        block_size=block_size,
+        scale=scale,
+        head_first=head_first,
+        cu_seqlens=cu_seqlens
+    )
+    return o
