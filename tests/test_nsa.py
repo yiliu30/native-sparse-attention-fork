@@ -53,7 +53,6 @@ def test_parallel(
     q = torch.randn((B, T, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
     k = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
     v = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-    s = torch.randint(1, S + 1, (B, T, H), device='cuda')
     do = torch.randn((B, T, HQ, D), dtype=dtype, device='cuda')
 
     indices = torch.full((B, T, H, S), T, dtype=torch.long, device='cuda')
@@ -63,14 +62,15 @@ def test_parallel(
                 i_i = torch.randperm(max(1, triton.cdiv(t, block_size)))[:S]
                 indices[b, t, h, :len(i_i)] = i_i
     indices = indices.sort(-1)[0]
+    counts = torch.randint(1, S + 1, (B, T, H), device='cuda')
 
-    ref = naive_nsa(q=q, k=k, v=v, indices=indices, s=s, block_size=block_size, scale=scale)
+    ref = naive_nsa(q=q, k=k, v=v, block_indices=indices, block_counts=counts, block_size=block_size, scale=scale)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
 
-    tri = parallel_nsa(q=q, k=k, v=v, indices=indices, s=s, block_size=block_size, scale=scale)
+    tri = parallel_nsa(q=q, k=k, v=v, block_indices=indices, block_counts=counts, block_size=block_size, scale=scale)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -113,25 +113,24 @@ def test_parallel_varlen(
     q = torch.randn((1, T, HQ, D), dtype=dtype, device='cuda').requires_grad_()
     k = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
     v = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    s = torch.randint(1, S + 1, (1, T, H), device='cuda')
     do = torch.randn((1, T, HQ, D), dtype=dtype, device='cuda')
 
-    indices = torch.full((1, T, H, S), T, dtype=torch.long, device='cuda')
     seq_indices = prepare_token_indices(offsets).tolist()
-
+    indices = torch.full((1, T, H, S), T, dtype=torch.long, device='cuda')
     for i in range(T):
         _, t = seq_indices[i]
         for h in range(H):
             i_i = torch.randperm(max(1, triton.cdiv(t, block_size)))[:S]
             indices[0, i, h, :len(i_i)] = i_i
     indices = indices.sort(-1)[0]
+    counts = torch.randint(1, S + 1, (1, T, H), device='cuda')
 
     ref = naive_nsa(
         q=q,
         k=k,
         v=v,
-        indices=indices,
-        s=s,
+        block_indices=indices,
+        block_counts=counts,
         block_size=block_size,
         cu_seqlens=offsets
     )
@@ -144,8 +143,8 @@ def test_parallel_varlen(
         q=q,
         k=k,
         v=v,
-        indices=indices,
-        s=s,
+        block_indices=indices,
+        block_counts=counts,
         block_size=block_size,
         cu_seqlens=offsets
     )
