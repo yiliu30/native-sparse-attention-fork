@@ -14,7 +14,7 @@ Efficient Triton implementations for [Native Sparse Attention: Hardware-Aligned 
 
 ## News
 
-- [2024/02/21] We support a variable number of selected blocks for queries across different positions and batches.
+- [2025/02/21] We support a variable number of selected blocks for queries across different positions and batches.
 
 ## Usage
 
