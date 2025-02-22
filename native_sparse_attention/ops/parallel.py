@@ -779,7 +779,7 @@ def parallel_nsa(
             Block indices of shape `[B, T, H, S]` if `head_first=False` else `[B, H, T, S]`.
             `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
         block_counts (torch.LongTensor):
-            Block counts of shape `[B, T, H]` if `head_first=True` else `[B, T, H]`.
+            Number of selected blocks for each token with shape `[B, T, H]` if `head_first=False` else `[B, H, T]`,
             If not provided, it will defaults to `S` blocks for each token.
             Default: `None`.
         block_size (int):
@@ -803,7 +803,9 @@ def parallel_nsa(
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     if head_first:
         q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, block_indices))
-        block_counts = rearrange(block_counts, 'b h t -> b t h')
+        if block_counts is not None:
+            block_counts = rearrange(block_counts, 'b h t -> b t h')
+            
     o = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, scale, cu_seqlens)
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')
@@ -834,10 +836,10 @@ def parallel_nsa_with_compression(
             Compressed keys representations of shape `[B, C, H, K]` if `head_first=False` else `[B, H, C, K]`.
             `C` is the number of compression blocks.
             Here we assume that the compression block size equals to `block_size`.
-        block_counts (Optional[Union[torch.LongTensor, int]]):
-            Number of selected blocks for each token.
-            If a tensor is provided, with shape `[B, T, H]` if `head_first=False` else `[B, H, T]`,
-            each token can select the same number of blocks.
+        block_counts (torch.LongTensor):
+            Number of selected blocks for each token with shape `[B, T, H]` if `head_first=False` else `[B, H, T]`,
+            If not provided, it will defaults to `S` blocks for each token.
+            Default: `None`.
         block_size (int):
             Selected block size. Default: 64.
         scale (Optional[int]):
@@ -859,7 +861,7 @@ def parallel_nsa_with_compression(
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     if head_first:
         q, k, v, k_cmp = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, k_cmp))
-        if not isinstance(block_counts, int):
+        if block_counts is not None:
             block_counts = rearrange(block_counts, 'b h t -> b t h')
 
     token_indices = prepare_token_indices(cu_seqlens) if cu_seqlens is not None else None
