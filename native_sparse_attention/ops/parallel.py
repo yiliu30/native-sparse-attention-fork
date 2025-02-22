@@ -836,7 +836,7 @@ def parallel_nsa_with_compression(
             Here we assume that the compression block size equals to `block_size`.
         block_counts (Optional[Union[torch.LongTensor, int]]):
             Number of selected blocks for each token.
-            If a tensor is provided, with shape `[B, T, H]` if `head_first=True` else `[B, T, H]`,
+            If a tensor is provided, with shape `[B, T, H]` if `head_first=False` else `[B, H, T]`,
             each token can select the same number of blocks.
         block_size (int):
             Selected block size. Default: 64.
