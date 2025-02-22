@@ -25,30 +25,25 @@ def _compare_and_swap(
     y = core.reshape(x, shape)
     # slice left/right with 'stride' 2**(n_dims - i - 1)
     mask = core.arange(0, 2)[None, :, None]
-    left = core.broadcast_to(sum(y * (1 - mask), 1)[:, None, :], shape)
-    right = core.broadcast_to(sum(y * mask, 1)[:, None, :], shape)
+    left = core.broadcast_to(sum(y * (1 - mask), 1)[:, None, :], shape).to(y.dtype)
+    right = core.broadcast_to(sum(y * mask, 1)[:, None, :], shape).to(y.dtype)
     left = core.reshape(left, x.shape)
     right = core.reshape(right, x.shape)
-
     # idx
     y_idx = core.reshape(ids, shape)
     left_idx = core.broadcast_to(sum(y_idx * (1 - mask), 1)[:, None, :], shape)
     right_idx = core.broadcast_to(sum(y_idx * mask, 1)[:, None, :], shape)
-    left_idx = core.reshape(left_idx, x.shape)
-    right_idx = core.reshape(right_idx, x.shape)
-
+    left_idx = core.reshape(left_idx, x.shape).to(y_idx.dtype)
+    right_idx = core.reshape(right_idx, x.shape).to(y_idx.dtype)
     # actual compare-and-swap
     idtype = core.get_int_dtype(bitwidth=x.dtype.primitive_bitwidth, signed=True)
     ileft = left.to(idtype, bitcast=True)
     iright = right.to(idtype, bitcast=True)
     ix = x.to(idtype, bitcast=True)
 
-    cond = (left > right) ^ flip
-
+    cond = (left > right) != flip
     ret = ix ^ core.where(cond, ileft ^ iright, zeros_like(ix))
-
     new_ids = ids ^ core.where(cond, left_idx ^ right_idx, zeros_like(ids))
-
     return ret.to(x.dtype, bitcast=True), new_ids
 
 
