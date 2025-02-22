@@ -20,7 +20,7 @@ from native_sparse_attention.ops.utils import argsort
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16]
+        for num_warps in [1, 2, 4, 8]
     ],
     key=['BS', 'BK'],
 )
@@ -53,7 +53,6 @@ def parallel_nsa_kernel_compression(
         bos, eos = i_b * T, i_b * T + T
 
     k += (bos * H + i_h) * K
-    block_indices += (bos + i_t) * H*S + i_h * S
 
     p_q = tl.make_block_ptr(q + (bos + i_t) * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
 
@@ -71,12 +70,14 @@ def parallel_nsa_kernel_compression(
     # lse = log(acc) + m
     b_acc = tl.zeros([G], dtype=tl.float32)
     for i_s in range(0, tl.cdiv(i_t, BS), BS):
+        o_s = i_s + tl.arange(0, BS)
+
         p_k = tl.make_block_ptr(k, (K, C), (1, H*K), (0, i_s), (BK, BS), (0, 1))
         # [BK, BS]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [G, BS]
         b_s = tl.dot(b_q, b_k)
-        b_s = tl.where((i_t >= (i_s + tl.arange(0, BS)))[None, :], b_s, float('-inf'))
+        b_s = tl.where((i_t >= (o_s * BS))[None, :], b_s, float('-inf'))
 
         # [G]
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
@@ -94,8 +95,8 @@ def parallel_nsa_kernel_compression(
     # 2. topk selection
     ################################
     # [BS]
-    b_i = tl.full([BS], float('-inf'), dtype=tl.float32)
-    o_i = tl.zeros([BS], dtype=tl.int32)
+    b_i = tl.full([BS], -1, dtype=tl.float32)
+    o_i = tl.full([BS], 0, dtype=tl.int32)
     m_i = 1 - tl.arange(0, 2).to(tl.float32)
     for i_s in range(0, tl.cdiv(i_t, BS), BS):
         o_s = i_s + tl.arange(0, BS)
@@ -105,7 +106,7 @@ def parallel_nsa_kernel_compression(
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [G, BS]
         b_s = tl.dot(b_q, b_k)
-        b_s = tl.where((i_t >= o_s * BS)[None, :], b_s, float('-inf'))
+        b_s = tl.where((i_t >= (o_s * BS))[None, :], b_s, float('-inf'))
 
         # [G, BS]
         b_p = tl.exp(b_s - b_lse[:, None])
@@ -124,7 +125,7 @@ def parallel_nsa_kernel_compression(
 
     m_top = (tl.arange(0, BS // S) == 0).to(tl.float32)
     b_top = tl.sum(m_top[:, None] * tl.reshape(o_i, [BS // S, S]), 0)
-    tl.store(block_indices + tl.arange(0, S), b_top.to(block_indices.dtype.element_ty))
+    tl.store(block_indices + (bos + i_t) * H*S + i_h * S + tl.arange(0, S), b_top.to(block_indices.dtype.element_ty))
 
 
 @triton.heuristics({
@@ -134,7 +135,7 @@ def parallel_nsa_kernel_compression(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16]
+        for num_warps in [1, 2, 4, 8]
     ],
     key=['BS', 'BK', 'BV'],
 )
@@ -279,7 +280,7 @@ def parallel_nsa_bwd_kernel_preprocess(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16]
+        for num_warps in [1, 2, 4, 8]
     ],
     key=['BS', 'BK', 'BV'],
 )
@@ -384,7 +385,7 @@ def parallel_nsa_bwd_kernel_dq(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16]
+        for num_warps in [1, 2, 4, 8]
     ],
     key=['BS', 'BK', 'BV'],
 )
@@ -487,7 +488,7 @@ def parallel_nsa_compression(
     BK = triton.next_power_of_2(K)
 
     grid = (T, B * H)
-    block_indices = torch.empty(B, T, H, S, dtype=torch.long, device=q.device)
+    block_indices = torch.zeros(B, T, H, S, dtype=torch.long, device=q.device)
 
     parallel_nsa_kernel_compression[grid](
         q=q,
@@ -505,7 +506,6 @@ def parallel_nsa_compression(
         BS=BS,
         BK=BK
     )
-
     return block_indices
 
 
