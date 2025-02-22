@@ -113,10 +113,11 @@ def parallel_nsa_kernel_compression(
         # the importance scores of the current block
         # [BS]
         b_i, b_ip = tl.sum(b_p, 0), b_i
+        o_i, o_ip = tl.where(o_s <= i_t//BS, o_s, 0), o_i
 
         b_i2, o_i2 = argsort(
             x=tl.reshape(m_i[:, None] * b_ip + (1 - m_i)[:, None] * b_i, [1, 2 * BS]),
-            ids=tl.reshape(m_i[:, None] * o_i + (1 - m_i)[:, None] * o_s, [1, 2 * BS]).to(tl.int32),
+            ids=tl.reshape(m_i[:, None] * o_ip + (1 - m_i)[:, None] * o_i, [1, 2 * BS]).to(tl.int32),
             dim=1,
             descending=True
         )
