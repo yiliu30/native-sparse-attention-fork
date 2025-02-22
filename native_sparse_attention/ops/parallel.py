@@ -129,7 +129,7 @@ def parallel_nsa_kernel_compression(
 
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None,
-    'USE_BLOCK_COUNTS': lambda args: args['block_counts'] is not None
+    'USE_BLOCK_COUNTS': lambda args: isinstance(args['block_counts'], torch.Tensor)
 })
 @triton.autotune(
     configs=[
@@ -226,7 +226,7 @@ def parallel_nsa_fwd_kernel(
 
 
 @triton.heuristics({
-    'USE_BLOCK_COUNTS': lambda args: args['block_counts'] is not None
+    'USE_BLOCK_COUNTS': lambda args: isinstance(args['block_counts'], torch.Tensor)
 })
 @triton.jit
 def parallel_nsa_kernel_mask(
@@ -274,7 +274,7 @@ def parallel_nsa_bwd_kernel_preprocess(
 
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None,
-    'USE_BLOCK_COUNTS': lambda args: args['block_counts'] is not None
+    'USE_BLOCK_COUNTS': lambda args: isinstance(args['block_counts'], torch.Tensor)
 })
 @triton.autotune(
     configs=[
@@ -474,8 +474,8 @@ def parallel_nsa_compression(
     q: torch.Tensor,
     k_cmp: torch.Tensor,
     block_counts: Union[torch.LongTensor, int],
-    block_size: int,
-    scale: float,
+    block_size: int = 64,
+    scale: float = None,
     offsets: Optional[torch.LongTensor] = None,
     token_indices: Optional[torch.LongTensor] = None,
 ) -> torch.LongTensor:
@@ -514,7 +514,7 @@ def parallel_nsa_fwd(
     k: torch.Tensor,
     v: torch.Tensor,
     block_indices: torch.LongTensor,
-    block_counts: torch.LongTensor,
+    block_counts: Union[torch.LongTensor, int],
     block_size: int,
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
@@ -565,7 +565,7 @@ def parallel_nsa_fwd(
 
 def parallel_nsa_block_mask(
     block_indices: torch.LongTensor,
-    block_counts: torch.LongTensor,
+    block_counts: Union[torch.LongTensor, int],
     offsets: torch.LongTensor,
     block_size: int
 ):
@@ -614,9 +614,9 @@ def parallel_nsa_bwd(
     lse: torch.Tensor,
     do: torch.Tensor,
     block_indices: torch.Tensor,
-    block_counts: torch.Tensor,
-    block_size: int,
-    scale: float,
+    block_counts: Union[torch.LongTensor, int],
+    block_size: int = 64,
+    scale: float = None,
     offsets: Optional[torch.LongTensor] = None,
     token_indices: Optional[torch.LongTensor] = None,
 ):
@@ -805,7 +805,7 @@ def parallel_nsa(
         q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, block_indices))
         if block_counts is not None:
             block_counts = rearrange(block_counts, 'b h t -> b t h')
-            
+
     o = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, scale, cu_seqlens)
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')
@@ -836,10 +836,10 @@ def parallel_nsa_with_compression(
             Compressed keys representations of shape `[B, C, H, K]` if `head_first=False` else `[B, H, C, K]`.
             `C` is the number of compression blocks.
             Here we assume that the compression block size equals to `block_size`.
-        block_counts (torch.LongTensor):
-            Number of selected blocks for each token with shape `[B, T, H]` if `head_first=False` else `[B, H, T]`,
-            If not provided, it will defaults to `S` blocks for each token.
-            Default: `None`.
+        block_counts (Optional[Union[torch.LongTensor, int]]):
+            Number of selected blocks for each query.
+            If a tensor is provided, with shape `[B, T, H]` if `head_first=False` else `[B, H, T]`,
+            each query can select the same number of blocks.
         block_size (int):
             Selected block size. Default: 64.
         scale (Optional[int]):
@@ -855,17 +855,19 @@ def parallel_nsa_with_compression(
         o (torch.Tensor):
             Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
     """
+    assert block_counts is not None, "block counts must be provided for selection"
+
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     if head_first:
         q, k, v, k_cmp = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, k_cmp))
-        if block_counts is not None:
+        if not isinstance(block_counts, int):
             block_counts = rearrange(block_counts, 'b h t -> b t h')
 
     token_indices = prepare_token_indices(cu_seqlens) if cu_seqlens is not None else None
-    block_indices = parallel_nsa_compression(q, k_cmp, block_size, scale, cu_seqlens, token_indices)
+    block_indices = parallel_nsa_compression(q, k_cmp, block_counts, block_size, scale, cu_seqlens, token_indices)
     o = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, scale, cu_seqlens)
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')
