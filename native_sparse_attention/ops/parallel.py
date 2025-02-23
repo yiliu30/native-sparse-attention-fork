@@ -20,7 +20,7 @@ from native_sparse_attention.ops.utils import argsort
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8]
+        for num_warps in [1, 2, 4]
     ],
     key=['BS', 'BK'],
 )
@@ -52,8 +52,6 @@ def parallel_nsa_kernel_compression(
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    k += (bos * H + i_h) * K
-
     p_q = tl.make_block_ptr(q + (bos + i_t) * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
 
     # the Q block is kept in the shared memory throughout the whole kernel
@@ -72,7 +70,7 @@ def parallel_nsa_kernel_compression(
     for i_s in range(0, tl.cdiv(i_t, BS), BS):
         o_s = i_s + tl.arange(0, BS)
 
-        p_k = tl.make_block_ptr(k, (K, C), (1, H*K), (0, i_s), (BK, BS), (0, 1))
+        p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, C), (1, H*K), (0, i_s), (BK, BS), (0, 1))
         # [BK, BS]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [G, BS]
@@ -96,12 +94,12 @@ def parallel_nsa_kernel_compression(
     ################################
     # [BS]
     b_i = tl.full([BS], -1, dtype=tl.float32)
-    o_i = tl.full([BS], 0, dtype=tl.int32)
-    m_i = 1 - tl.arange(0, 2).to(tl.float32)
+    o_i = tl.zeros([BS], dtype=tl.int32)
+    m_i = tl.arange(0, BS) < BS // 2
     for i_s in range(0, tl.cdiv(i_t, BS), BS):
         o_s = i_s + tl.arange(0, BS)
 
-        p_k = tl.make_block_ptr(k, (K, C), (1, H*K), (0, i_s), (BK, BS), (0, 1))
+        p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, C), (1, H*K), (0, i_s), (BK, BS), (0, 1))
         # [BK, BS]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [G, BS]
@@ -115,18 +113,16 @@ def parallel_nsa_kernel_compression(
         b_i, b_ip = tl.sum(b_p, 0), b_i
         o_i, o_ip = tl.where(o_s <= i_t//BS, o_s, 0), o_i
 
-        b_i2, o_i2 = argsort(
-            x=tl.reshape(m_i[:, None] * b_ip + (1 - m_i)[:, None] * b_i, [1, 2 * BS]),
-            ids=tl.reshape(m_i[:, None] * o_ip + (1 - m_i)[:, None] * o_i, [1, 2 * BS]).to(tl.int32),
-            dim=1,
-            descending=True
-        )
-        b_i = tl.sum(m_i[:, None] * tl.reshape(b_i2, [2, BS]), 0)
-        o_i = tl.sum(m_i[:, None] * tl.reshape(o_i2, [2, BS]), 0).to(tl.int32)
+        b_i, o_i = argsort(b_i, o_i.to(tl.int32), dim=0, descending=False)
+        b_i = b_ip * m_i + b_i * (1 - m_i)
+        o_i = o_ip * m_i + o_i * (1 - m_i)
+        b_i, o_i = argsort(b_i, o_i.to(tl.int32), dim=0, descending=True)
 
-    m_top = (tl.arange(0, BS // S) == 0).to(tl.float32)
+    m_top = tl.arange(0, BS // S) == 0
     b_top = tl.sum(m_top[:, None] * tl.reshape(o_i, [BS // S, S]), 0)
-    tl.store(block_indices + (bos + i_t) * H*S + i_h * S + tl.arange(0, S), b_top.to(block_indices.dtype.element_ty))
+
+    p_b = tl.make_block_ptr(block_indices + (bos + i_t) * H*S, (H*S,), (1,), (i_h * S,), (S,), (0,))
+    tl.store(p_b, b_top.to(p_b.dtype.element_ty))
 
 
 @triton.heuristics({
@@ -484,7 +480,7 @@ def parallel_nsa_compression(
     B, T, HQ, K = q.shape
     H = k_cmp.shape[2]
     G = HQ // H
-    S = block_counts if isinstance(block_counts, int) else triton.next_power_of_2(block_counts.max().item())
+    S = triton.next_power_of_2(block_counts if isinstance(block_counts, int) else block_counts.max().item())
     BS = block_size
     BK = triton.next_power_of_2(K)
 
