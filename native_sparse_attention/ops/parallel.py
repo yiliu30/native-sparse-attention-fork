@@ -467,10 +467,18 @@ def parallel_nsa_bwd_kernel_dkv(
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
+def compression(
+    k: torch.Tensor,
+    block_size: int
+) -> torch.Tensor:
+    ### Currently, we set mean pooling as our basic compression function.
+    assert k.shape[1] % block_size == 0, "sequence length must be divisible by block size"
+    k_cmp = k.view(k.shape[0], block_size, k.shape[1] // 64, *k.shape[2:]).mean(dim=1)
+    return k_cmp
 
 def parallel_nsa_compression(
     q: torch.Tensor,
-    k_cmp: torch.Tensor,
+    k: torch.Tensor,
     block_counts: Union[torch.LongTensor, int],
     block_size: int = 64,
     scale: float = None,
@@ -478,13 +486,14 @@ def parallel_nsa_compression(
     token_indices: Optional[torch.LongTensor] = None,
 ) -> torch.LongTensor:
     B, T, HQ, K = q.shape
-    H = k_cmp.shape[2]
+    H = k.shape[2]
     G = HQ // H
     S = triton.next_power_of_2(block_counts if isinstance(block_counts, int) else block_counts.max().item())
     BS = block_size
     BK = triton.next_power_of_2(K)
 
     grid = (T, B * H)
+    k_cmp = compression(k, BS)
     block_indices = torch.zeros(B, T, H, S, dtype=torch.long, device=q.device)
 
     parallel_nsa_kernel_compression[grid](
@@ -813,7 +822,6 @@ def parallel_nsa_with_compression(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    k_cmp: torch.Tensor,
     block_counts: Union[torch.LongTensor, int],
     block_size: int = 64,
     scale: Optional[float] = None,
@@ -829,10 +837,6 @@ def parallel_nsa_with_compression(
             GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16.
         v (torch.Tensor):
             values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
-        k_cmp (torch.Tensor):
-            Compressed keys representations of shape `[B, C, H, K]` if `head_first=False` else `[B, H, C, K]`.
-            `C` is the number of compression blocks.
-            Here we assume that the compression block size equals to `block_size`.
         block_counts (Optional[Union[torch.LongTensor, int]]):
             Number of selected blocks for each query.
             If a tensor is provided, with shape `[B, T, H]` if `head_first=False` else `[B, H, T]`,
@@ -859,12 +863,12 @@ def parallel_nsa_with_compression(
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     if head_first:
-        q, k, v, k_cmp = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, k_cmp))
+        q, k, v = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v))
         if not isinstance(block_counts, int):
             block_counts = rearrange(block_counts, 'b h t -> b t h')
 
     token_indices = prepare_token_indices(cu_seqlens) if cu_seqlens is not None else None
-    block_indices = parallel_nsa_compression(q, k_cmp, block_counts, block_size, scale, cu_seqlens, token_indices)
+    block_indices = parallel_nsa_compression(q, k, block_counts, block_size, scale, cu_seqlens, token_indices)
     o = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, scale, cu_seqlens)
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')
