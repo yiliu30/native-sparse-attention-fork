@@ -150,7 +150,7 @@ def naive_nsa_compression(
     attn_cmp = torch.einsum('bqhd,bkhd->bhqk', q*scale, k_cmp)
     attn_cmp = attn_cmp.masked_fill(casual_mask, float('-inf'))
     attn_cmp = attn_cmp.softmax(-1)
-    o_cmp = torch.einsum('bhqk, bkhd -> bqhd', attn_cmp, v_cmp)
+    o_cmp = torch.einsum('bhqk, bkhd -> bqhd', attn_cmp, v_cmp).nan_to_num()
     attn_select = attn_cmp.masked_fill(local_mask, float(1.0))
     attn_select = attn_select.view(B, H, G, T, C).sum(2)
     block_indices = attn_select.topk(S, -1)[1]
