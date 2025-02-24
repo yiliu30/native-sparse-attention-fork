@@ -34,6 +34,7 @@ def assert_close(prefix, ref, tri, ratio):
 @pytest.mark.parametrize("D", [100, 64])
 @pytest.mark.parametrize("S", [16])
 @pytest.mark.parametrize("block_size", [32])
+@pytest.mark.parametrize("window_size", [0])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("scale", [0.1])
 def test_parallel(
@@ -44,6 +45,7 @@ def test_parallel(
     D: int,
     S: int,
     block_size: int,
+    window_size: int,
     dtype: torch.dtype,
     scale: float
 ):
@@ -53,6 +55,8 @@ def test_parallel(
     q = torch.randn((B, T, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
     k = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
     v = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
+    g_slc = torch.rand((B, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
+    g_swa = torch.rand((B, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
     do = torch.randn((B, T, HQ, D), dtype=dtype, device='cuda')
 
     block_indices = torch.full((B, T, H, S), T, dtype=torch.long, device='cuda')
@@ -68,34 +72,43 @@ def test_parallel(
         q=q,
         k=k,
         v=v,
+        g_slc=g_slc,
+        g_swa=g_swa,
         block_indices=block_indices,
         block_counts=block_counts,
         block_size=block_size,
+        window_size=window_size,
         scale=scale
     )
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
+    ref_dg_slc, g_slc.grad = g_slc.grad.clone(), None
 
     tri = parallel_nsa(
         q=q,
         k=k,
         v=v,
+        g_slc=g_slc,
+        g_swa=g_swa,
         block_indices=block_indices,
         block_counts=block_counts,
         block_size=block_size,
+        window_size=window_size,
         scale=scale
     )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
+    tri_dg_slc, g_slc.grad = g_slc.grad.clone(), None
 
     assert_close(" o", ref, tri, 0.005)
     assert_close("dq", ref_dq, tri_dq, 0.005)
     assert_close("dk", ref_dk, tri_dk, 0.005)
     assert_close("dv", ref_dv, tri_dv, 0.005)
+    assert_close("dg_slc", ref_dg_slc, tri_dg_slc, 0.005)
 
 
 @pytest.mark.parametrize("N", [4])
@@ -105,6 +118,7 @@ def test_parallel(
 @pytest.mark.parametrize("D", [100, 64])
 @pytest.mark.parametrize("S", [16])
 @pytest.mark.parametrize("block_size", [32])
+@pytest.mark.parametrize("window_size", [0])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_parallel_varlen(
     N: int,
@@ -114,6 +128,7 @@ def test_parallel_varlen(
     D: int,
     S: int,
     block_size: int,
+    window_size: int,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -129,6 +144,8 @@ def test_parallel_varlen(
     q = torch.randn((1, T, HQ, D), dtype=dtype, device='cuda').requires_grad_()
     k = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
     v = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
+    g_slc = torch.rand((1, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
+    g_swa = torch.rand((1, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
     do = torch.randn((1, T, HQ, D), dtype=dtype, device='cuda')
 
     token_indices = prepare_token_indices(offsets).tolist()
@@ -145,31 +162,40 @@ def test_parallel_varlen(
         q=q,
         k=k,
         v=v,
+        g_slc=g_slc,
+        g_swa=g_swa,
         block_indices=block_indices,
         block_counts=block_counts,
         block_size=block_size,
+        window_size=window_size,
         cu_seqlens=offsets
     )
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
+    ref_dg_slc, g_slc.grad = g_slc.grad.clone(), None
 
     tri = parallel_nsa(
         q=q,
         k=k,
         v=v,
+        g_slc=g_slc,
+        g_swa=g_swa,
         block_indices=block_indices,
         block_counts=block_counts,
         block_size=block_size,
+        window_size=window_size,
         cu_seqlens=offsets
     )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
+    tri_dg_slc, g_slc.grad = g_slc.grad.clone(), None
 
     assert_close("  o", ref, tri, 0.004)
     assert_close("dq", ref_dq, tri_dq, 0.005)
     assert_close("dk", ref_dk, tri_dk, 0.005)
     assert_close("dv", ref_dv, tri_dv, 0.005)
+    assert_close("dg_slc", ref_dg_slc, tri_dg_slc, 0.005)
