@@ -66,7 +66,7 @@ def test_parallel(
                 i_i = torch.randperm(max(1, triton.cdiv(t, block_size)))[:S]
                 block_indices[b, t, h, :len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
-    block_counts = torch.randint(1, S + 1, (B, T, H), device='cuda')
+    block_counts = torch.randint(1, S + 1, (B, T, H), dtype=torch.long, device='cuda')
 
     ref = naive_nsa(
         q=q,
@@ -85,6 +85,8 @@ def test_parallel(
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
     ref_dg_slc, g_slc.grad = g_slc.grad.clone(), None
+    if window_size > 0:
+        ref_dg_swa, g_swa.grad = g_swa.grad.clone(), None
 
     tri = parallel_nsa(
         q=q,
@@ -103,12 +105,16 @@ def test_parallel(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
     tri_dg_slc, g_slc.grad = g_slc.grad.clone(), None
+    if window_size > 0:
+        tri_dg_swa, g_swa.grad = g_swa.grad.clone(), None
 
     assert_close(" o", ref, tri, 0.005)
     assert_close("dq", ref_dq, tri_dq, 0.005)
     assert_close("dk", ref_dk, tri_dk, 0.005)
     assert_close("dv", ref_dv, tri_dv, 0.005)
     assert_close("dg_slc", ref_dg_slc, tri_dg_slc, 0.005)
+    if window_size > 0:
+        assert_close("dg_swa", ref_dg_swa, tri_dg_swa, 0.005)
 
 
 @pytest.mark.parametrize("N", [4])
@@ -175,6 +181,8 @@ def test_parallel_varlen(
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
     ref_dg_slc, g_slc.grad = g_slc.grad.clone(), None
+    if window_size > 0:
+        ref_dg_swa, g_swa.grad = g_swa.grad.clone(), None
 
     tri = parallel_nsa(
         q=q,
@@ -193,9 +201,13 @@ def test_parallel_varlen(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
     tri_dg_slc, g_slc.grad = g_slc.grad.clone(), None
+    if window_size > 0:
+        tri_dg_swa, g_swa.grad = g_swa.grad.clone(), None
 
-    assert_close("  o", ref, tri, 0.004)
+    assert_close(" o", ref, tri, 0.004)
     assert_close("dq", ref_dq, tri_dq, 0.005)
     assert_close("dk", ref_dk, tri_dk, 0.005)
     assert_close("dv", ref_dv, tri_dv, 0.005)
     assert_close("dg_slc", ref_dg_slc, tri_dg_slc, 0.005)
+    if window_size > 0:
+        assert_close("dg_swa", ref_dg_swa, tri_dg_swa, 0.005)

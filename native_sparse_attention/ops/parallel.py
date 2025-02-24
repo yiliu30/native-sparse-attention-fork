@@ -908,7 +908,7 @@ def parallel_nsa(
     g_slc: torch.Tensor,
     g_swa: torch.Tensor,
     block_indices: torch.LongTensor,
-    block_counts: Optional[torch.LongTensor] = None,
+    block_counts: Optional[Union[torch.LongTensor, int]] = None,
     block_size: int = 64,
     window_size: int = 0,
     scale: Optional[float] = None,
@@ -931,10 +931,11 @@ def parallel_nsa(
         block_indices (torch.LongTensor):
             Block indices of shape `[B, T, H, S]` if `head_first=False` else `[B, H, T, S]`.
             `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
-        block_counts (torch.LongTensor):
-            Number of selected blocks for each token with shape `[B, T, H]` if `head_first=False` else `[B, H, T]`,
-            If not provided, it will defaults to `S` blocks for each token.
-            Default: `None`.
+        block_counts (Union[torch.LongTensor, int]):
+            Number of selected blocks for each token.
+            If a tensor is provided, with shape `[B, T, H]` if `head_first=True` else `[B, T, H]`,
+            each token can select the same number of blocks.
+            If not provided, it will default to `S`, Default: `None`
         block_size (int):
             Selected block size. Default: 64.
         window_size (int):
@@ -959,8 +960,12 @@ def parallel_nsa(
     if head_first:
         q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, block_indices))
         g_slc, g_swa = map(lambda x: rearrange(x, 'b h t -> b t h'), (g_slc, g_swa))
-        if block_counts is not None:
+        if isinstance(block_counts, torch.Tensor):
             block_counts = rearrange(block_counts, 'b h t -> b t h')
+
+    if isinstance(block_counts, int):
+        block_indices = block_indices[:, :, :, :block_counts]
+        block_counts = None
 
     o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, window_size, scale, cu_seqlens)
     o = o_slc * g_slc.unsqueeze(-1) + o_swa * g_swa.unsqueeze(-1) if window_size > 0 else o_slc * g_slc.unsqueeze(-1)
