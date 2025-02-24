@@ -35,6 +35,17 @@ git submodule update --init --recursive
 
 ## Usage
 
+To test the correctness of NSA (The `nsa_with_compression` function is still under development now):
+```py
+pytest tests/test_nsa.py
+```
+
+To measure the efficiency of NSA:
+```py
+python benchmark/benchmark_nsa.py
+```
+
+To direct use our NSA kernel:
 ```py
 from native_sparse_attention.ops.parallel import parallel_nsa
 
