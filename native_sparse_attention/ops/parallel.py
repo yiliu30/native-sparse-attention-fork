@@ -473,7 +473,7 @@ def compression(
 ) -> torch.Tensor:
     ### Currently, we set mean pooling as our basic compression function.
     assert k.shape[1] % block_size == 0, "sequence length must be divisible by block size"
-    k_cmp = k.view(k.shape[0], block_size, k.shape[1] // 64, *k.shape[2:]).mean(dim=1)
+    k_cmp = k.view(k.shape[0], block_size, k.shape[1] // block_size, *k.shape[2:]).mean(dim=1)
     return k_cmp
 
 def parallel_nsa_compression(

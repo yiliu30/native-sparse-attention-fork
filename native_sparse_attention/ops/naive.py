@@ -3,8 +3,9 @@
 
 from typing import Optional, Union
 
+import math
 import torch
-import triton
+import torch.nn.functional as F
 from einops import rearrange, repeat
 
 
@@ -108,38 +109,55 @@ def naive_nsa(
 
 def compression(
     k: torch.Tensor,
+    v: torch.Tensor,
     block_size: int
 ) -> torch.Tensor:
-    ### Currently, we set mean pooling as our basic compression function.
-    assert k.shape[1] % block_size == 0, "sequence length must be divisible by block size"
-    k_cmp = k.view(k.shape[0], block_size, k.shape[1] // 64, *k.shape[2:]).mean(dim=1)
-    return k_cmp
+    """
+    Currently, we set mean pooling as our basic compression function.
+    We pad the incomplete blocks during compression for consistency, but the incomplete blocks won't be used later.
+    """
+    B, T, H = k.shape[:3]
+    num_block = math.ceil(T / block_size)
+    if k.shape[1] % block_size != 0:
+        k = F.pad(k, (0, 0, 0, 0, 0, num_block * block_size - T))
+        v = F.pad(v, (0, 0, 0, 0, 0, num_block * block_size - T))
+    k_cmp = k.view(B, block_size, num_block, H, -1).mean(dim=1)
+    v_cmp = v.view(B, block_size, num_block, H, -1).mean(dim=1)
+    return k_cmp, v_cmp
 
 def naive_nsa_compression(
     q: torch.Tensor,
     k: torch.Tensor,
+    v: torch.Tensor,
     block_counts: Union[torch.LongTensor, int],
     block_size: int,
     scale: float,
 ) -> torch.LongTensor:
-    B, T, C = q.shape[0], q.shape[1], k_cmp.shape[1]
-    H, HQ = k_cmp.shape[2], q.shape[2]
+    B, T = q.shape[0], q.shape[1]
+    H, HQ = k.shape[2], q.shape[2]
     G = HQ//H
     BS = block_size
-    S = block_counts if isinstance(block_counts, int) else triton.next_power_of_2(block_counts.max().item())
-    k_cmp = compression(k, BS)
-    k_cmp = repeat(k_cmp, 'b c h d -> b c (h g) d', g=G)
-    q, k_cmp = map(lambda x: x.float(), (q, k_cmp))
+    S = block_counts if isinstance(block_counts, int) else block_counts.max().item()
+    k_cmp, v_cmp = compression(k, v, BS)
+    C = k_cmp.shape[1]
+    S = min(S, C)
+    k_cmp, v_cmp = map(lambda x: repeat(x, 'b c h d -> b c (h g) d', g=G), (k_cmp, v_cmp))
+    q, k_cmp, v_cmp = map(lambda x: x.float(), (q, k_cmp, v_cmp))
 
-    mask = (torch.arange(T)[:, None]//BS < torch.arange(C)[None, :]).to(q.device)
-    attn = torch.einsum('bqhd,bkhd->bhqk', q*scale, k_cmp)
-    attn = attn.masked_fill(mask, float('-inf')).softmax(-1)
-    attn = attn.view(B, H, G, T, -1).sum(2)
-    block_indices = attn.topk(S, -1)[1]
+    casual_mask = ((torch.arange(T) - BS + 1)[:, None] // BS < torch.arange(C)[None, :]).to(q.device)
+    local_mask = (torch.arange(T)[:, None] // BS == torch.arange(C)[None, :]).to(q.device)
+
+    attn_cmp = torch.einsum('bqhd,bkhd->bhqk', q*scale, k_cmp)
+    attn_cmp = attn_cmp.masked_fill(casual_mask, float('-inf'))
+    attn_cmp = attn_cmp.softmax(-1)
+    o_cmp = torch.einsum('bhqk, bkhd -> bqhd', attn_cmp, v_cmp)
+    attn_select = attn_cmp.masked_fill(local_mask, float(1.0))
+    attn_select = attn_select.view(B, H, G, T, C).sum(2)
+    block_indices = attn_select.topk(S, -1)[1]
 
     block_indices = block_indices.masked_fill(block_indices > (block_indices.new_tensor(range(T))[:, None]//BS), 0)
     block_indices = block_indices.transpose(1, 2)
-    return block_indices
+    return block_indices, o_cmp
 
 
 def naive_nsa_with_compression(
@@ -189,7 +207,7 @@ def naive_nsa_with_compression(
         if not isinstance(block_counts, int):
             block_counts = rearrange(block_counts, 'b h t -> b t h')
 
-    block_indices = naive_nsa_compression(q, k, block_counts, block_size, scale)
+    block_indices, o_cmp = naive_nsa_compression(q, k, v, block_counts, block_size, scale)
     o = naive_nsa(
         q=q,
         k=k,
@@ -201,4 +219,5 @@ def naive_nsa_with_compression(
         head_first=head_first,
         cu_seqlens=cu_seqlens
     )
-    return o
+ 
+    return o + o_cmp
