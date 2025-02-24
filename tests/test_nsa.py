@@ -141,9 +141,9 @@ def test_parallel_varlen(
         torch.tensor([T], dtype=torch.long)
     ], 0).cuda().sort()[0]
     # seq-first required for inputs with variable lengths
-    q = torch.randn((1, T, HQ, D), dtype=dtype, device='cuda').requires_grad_()
-    k = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    v = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
+    q = torch.randn((1, T, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
+    k = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
+    v = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
     g_slc = torch.rand((1, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
     g_swa = torch.rand((1, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
     do = torch.randn((1, T, HQ, D), dtype=dtype, device='cuda')
