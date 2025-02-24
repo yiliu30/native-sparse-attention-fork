@@ -14,7 +14,24 @@ Efficient Triton implementations for [Native Sparse Attention: Hardware-Aligned 
 
 ## News
 
+- [2025/02/24] We support the fused selected attention and sliding attention triton kernel.
 - [2025/02/21] We support a variable number of selected blocks for queries across different positions and batches.
+
+### Setup
+
+To get started, clone the `native-sparse-attention` repository and install the required dependencies:
+
+```bash
+git clone https://github.com/fla-org/native-sparse-attention.git
+cd native-sparse-attention
+pip install . 
+```
+
+`native-sparse-attention` manages minimal dependencies, only including `fla` as submodules. 
+After installation, initialize and update the submodules:
+```sh
+git submodule update --init --recursive
+```
 
 ## Usage
 
@@ -23,26 +40,34 @@ from native_sparse_attention.ops.parallel import parallel_nsa
 
 B, T, H, HQ, D = 4, 2048, 4, 64, 64
 block_size = 64
+window_size = 64
+
 q = torch.randn((B, T, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
 k = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
 v = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
+g_slc = torch.rand((B, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
+g_swa = torch.rand((B, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
+
 # randomly generated block indices
-indices = torch.full((B, T, H, S), T, dtype=torch.long, device='cuda')
-s = torch.randint(1, S + 1, (B, T, H), device='cuda')
+block_indices = torch.full((B, T, H, S), T, dtype=torch.long, device=device)
 for b in range(B):
     for t in range(T):
         for h in range(H):
             i_i = torch.randperm(max(1, triton.cdiv(t, block_size)))[:S]
-            indices[b, t, h, :len(i_i)] = i_i
-indices = indices.sort(-1)[0]
+            block_indices[b, t, h, :len(i_i)] = i_i
+block_indices = block_indices.sort(-1)[0]
+block_counts = torch.randint(1, S + 1, (B, T, H), device=device)
 
 parallel_nsa(
-  q=q,
-  k=k,
-  v=v,
-  indices=indices,
-  s=s,
-  block_size=block_size
+    q=q,
+    k=k,
+    v=v,
+    g_slc=g_slc,
+    g_swa=g_swa,
+    block_indices=block_indices,
+    block_counts=block_counts,
+    block_size=block_size,
+    window_size=window_size,
 )
 
 # variable-length inputs are supported as well
@@ -54,26 +79,32 @@ offsets = torch.cat([
     torch.tensor([T], dtype=torch.long)
 ], 0).cuda().sort()[0]
 # seq-first required for inputs with variable lengths
-q = torch.randn((1, T, HQ, D), dtype=dtype, device='cuda').requires_grad_()
-k = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-v = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
+q = torch.randn((1, T, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
+k = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
+v = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
+g_slc = torch.rand((B, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
+g_swa = torch.rand((B, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
 
-indices = torch.full((1, T, H, S), T, dtype=torch.long, device='cuda')
-s = torch.randint(1, S + 1, (B, T, H), device='cuda')
-seq_indices = prepare_token_indices(offsets).tolist()
-for i in range(T):
-    _, t = seq_indices[i]
-    for h in range(H):
-        i_i = torch.randperm(max(1, triton.cdiv(t, block_size)))[:S]
-        indices[0, i, h, :len(i_i)] = i_i
-indices = indices.sort(-1)[0]
+# randomly generated block indices
+block_indices = torch.full((B, T, H, S), T, dtype=torch.long, device=device)
+for b in range(B):
+    for t in range(T):
+        for h in range(H):
+            i_i = torch.randperm(max(1, triton.cdiv(t, block_size)))[:S]
+            block_indices[b, t, h, :len(i_i)] = i_i
+block_indices = block_indices.sort(-1)[0]
+block_counts = torch.randint(1, S + 1, (B, T, H), device=device)
+
 parallel_nsa(
     q=q,
     k=k,
     v=v,
-    indices=indices,
-    s=s,
+    g_slc=g_slc,
+    g_swa=g_swa,
+    block_indices=block_indices,
+    block_counts=block_counts,
     block_size=block_size,
+    window_size=window_size,
     cu_seqlens=offsets
 )
 ```
@@ -83,14 +114,14 @@ parallel_nsa(
 ```sh
 Performance:
          T        nsa     nsa_bwd      flash   flash_bwd
-0    128.0   0.116224    0.561968   0.019552    0.123888
-1    256.0   0.216896    0.963808   0.041472    0.223840
-2    512.0   0.414688    1.951680   0.093168    0.486176
-3   1024.0   0.813952    4.039584   0.260000    1.252896
-4   2048.0   1.672784    9.081648   0.855856    3.794176
-5   4096.0   3.518624   19.852303   3.196768   12.965824
-6   8192.0   7.535328   43.620705  12.336976   47.652878
-7  16384.0  16.107521  102.203011  48.110847  186.464386
+0    128.0   0.091168    0.672992   0.020128    0.161504
+1    256.0   0.189408    1.222848   0.045024    0.225056
+2    512.0   0.435616    2.363264   0.105664    0.503264
+3   1024.0   1.043200    5.091552   0.296944    1.323456
+4   2048.0   2.322016   11.124559   0.970208    4.076928
+5   4096.0   4.869712   23.082577   3.520352   14.193248
+6   8192.0   9.953824   49.575199  13.464992   52.566914
+7  16384.0  20.164879  116.297920  53.633568  204.353607
 ```
 <div align="center">
 <img width="400" alt="image" src="https://github.com/user-attachments/assets/efc25313-b058-47ae-b96e-ed67c62c134d">
