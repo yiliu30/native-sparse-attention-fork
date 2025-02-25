@@ -3,15 +3,19 @@
 
 from typing import Optional, Union
 
+import math
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
+import triton.language.core as core
 from einops import rearrange
 
 from fla.ops.common.utils import (prepare_chunk_indices, prepare_lens,
                                   prepare_token_indices)
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
-from native_sparse_attention.ops.utils import argsort
+from native_sparse_attention.ops.utils import argsort, _bitonic_merge
+from triton.language.standard import _log2
 
 
 @triton.heuristics({
@@ -60,6 +64,7 @@ def parallel_nsa_kernel_compression(
     b_q = (b_q * scale).to(b_q.dtype)
 
     C = tl.cdiv(T, BS)
+    step: core.constexpr = 2 * S
     ################################
     # 1. lse computation
     ################################
@@ -67,20 +72,20 @@ def parallel_nsa_kernel_compression(
     b_m = tl.full([G], float('-inf'), dtype=tl.float32)
     # lse = log(acc) + m
     b_acc = tl.zeros([G], dtype=tl.float32)
-    for i_s in range(0, tl.cdiv(i_t, BS), BS):
-        o_s = i_s + tl.arange(0, BS)
+    for i_s in range(0, (i_t + 1) // BS, step):
+        o_s = i_s + tl.arange(0, step)
 
-        p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, C), (1, H*K), (0, i_s), (BK, BS), (0, 1))
-        # [BK, BS]
+        p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, C), (1, H*K), (0, i_s), (BK, step), (0, 1))
+        # [BK, step]
         b_k = tl.load(p_k, boundary_check=(0, 1))
-        # [G, BS]
+        # [G, step]
         b_s = tl.dot(b_q, b_k)
-        b_s = tl.where((i_t >= (o_s * BS))[None, :], b_s, float('-inf'))
+        b_s = tl.where(((i_t + 1) // BS > o_s)[None, :], b_s, float('-inf'))
 
         # [G]
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
         b_r = tl.exp(b_mp - b_m)
-        # [G, BS]
+        # [G, step]
         b_p = tl.exp(b_s - b_m[:, None])
         # [G]
         b_acc = b_acc * b_r + tl.sum(b_p, 1)
@@ -88,38 +93,46 @@ def parallel_nsa_kernel_compression(
         b_mp = b_m
     # [G]
     b_lse = b_m + tl.log(b_acc)
+    
 
     ################################
     # 2. topk selection
     ################################
     # [BS]
-    b_i = tl.full([BS], -1, dtype=tl.float32)
-    o_i = tl.zeros([BS], dtype=tl.int32)
-    m_i = tl.arange(0, BS) < BS // 2
-    for i_s in range(0, tl.cdiv(i_t, BS), BS):
-        o_s = i_s + tl.arange(0, BS)
+    b_i = tl.full([step], -1, dtype=tl.float32)
+    o_i = tl.zeros([step], dtype=tl.int32)
+    m_i = tl.arange(0, step) < S
+    for i_s in range(0, i_t // BS + 1, step):
+        o_s = i_s + tl.arange(0, step)
 
-        p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, C), (1, H*K), (0, i_s), (BK, BS), (0, 1))
+        p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, C), (1, H*K), (0, i_s), (BK, step), (0, 1))
         # [BK, BS]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [G, BS]
         b_s = tl.dot(b_q, b_k)
-        b_s = tl.where((i_t >= (o_s * BS))[None, :], b_s, float('-inf'))
-
+        b_s = tl.where((i_t // BS > o_s)[None, :], b_s, float('-inf'))
         # [G, BS]
-        b_p = tl.exp(b_s - b_lse[:, None])
+        b_p = tl.where((i_t // BS == o_s)[None, :], float(1.0), tl.exp(b_s - b_lse[:, None]))
         # the importance scores of the current block
         # [BS]
         b_i, b_ip = tl.sum(b_p, 0), b_i
-        o_i, o_ip = tl.where(o_s <= i_t//BS, o_s, 0), o_i
+        o_i, o_ip = tl.where(o_s <= i_t // BS, o_s, 0), o_i
 
-        b_i, o_i = argsort(b_i, o_i.to(tl.int32), dim=0, descending=False)
-        b_i = b_ip * m_i + b_i * (1 - m_i)
-        o_i = o_ip * m_i + o_i * (1 - m_i)
-        b_i, o_i = argsort(b_i, o_i.to(tl.int32), dim=0, descending=True)
 
-    m_top = tl.arange(0, BS // S) == 0
-    b_top = tl.sum(m_top[:, None] * tl.reshape(o_i, [BS // S, S]), 0)
+        n_dims: core.constexpr = _log2(b_i.shape[0])
+        for i in core.static_range(1, n_dims):
+            b_i, o_i = _bitonic_merge(b_i, o_i.to(tl.int32), i, 2, n_dims)
+
+        if i_s != 0:
+            b_i, o_i = _bitonic_merge(b_i, o_i.to(tl.int32), n_dims, False, n_dims)
+            b_i_new = b_ip * m_i + b_i * (1 - m_i)
+            o_i_new = o_ip * m_i + o_i * (1 - m_i)
+            b_i, o_i = _bitonic_merge(b_i_new, o_i_new.to(tl.int32), n_dims, True, n_dims)
+        else:
+            b_i, o_i = _bitonic_merge(b_i, o_i.to(tl.int32), n_dims, True, n_dims)
+
+    m_top = tl.arange(0, 2) == 0
+    b_top = tl.sum(m_top[:, None] * tl.reshape(o_i, [2, S]), 0)
 
     p_b = tl.make_block_ptr(block_indices + (bos + i_t) * H*S, (H*S,), (1,), (i_h * S,), (S,), (0,))
     tl.store(p_b, b_top.to(p_b.dtype.element_ty))
@@ -582,16 +595,23 @@ def parallel_nsa_bwd_kernel_dkv(
 
 def compression(
     k: torch.Tensor,
+    v: torch.Tensor,
     block_size: int
 ) -> torch.Tensor:
     ### Currently, we set mean pooling as our basic compression function.
-    assert k.shape[1] % block_size == 0, "sequence length must be divisible by block size"
-    k_cmp = k.view(k.shape[0], block_size, k.shape[1] // block_size, *k.shape[2:]).mean(dim=1)
-    return k_cmp
+    B, T, H = k.shape[:3]
+    num_block = math.ceil(T / block_size)
+    if k.shape[1] % block_size != 0:
+        k = F.pad(k, (0, 0, 0, 0, 0, num_block * block_size - T))
+        v = F.pad(v, (0, 0, 0, 0, 0, num_block * block_size - T))
+    k_cmp = k.view(B, block_size, num_block, H, -1).mean(dim=1)
+    v_cmp = v.view(B, block_size, num_block, H, -1).mean(dim=1)
+    return k_cmp, v_cmp
 
 def parallel_nsa_compression(
     q: torch.Tensor,
     k: torch.Tensor,
+    v: torch.Tensor,
     block_counts: Union[torch.LongTensor, int],
     block_size: int = 64,
     scale: float = None,
@@ -606,7 +626,8 @@ def parallel_nsa_compression(
     BK = triton.next_power_of_2(K)
 
     grid = (T, B * H)
-    k_cmp = compression(k, BS)
+    k_cmp, v_cmp = compression(k, v, BS)
+    C = k_cmp.shape[1]
     block_indices = torch.zeros(B, T, H, S, dtype=torch.long, device=q.device)
 
     parallel_nsa_kernel_compression[grid](
@@ -1031,8 +1052,9 @@ def parallel_nsa_with_compression(
             block_counts = rearrange(block_counts, 'b h t -> b t h')
 
     token_indices = prepare_token_indices(cu_seqlens) if cu_seqlens is not None else None
-    block_indices = parallel_nsa_compression(q, k, block_counts, block_size, scale, cu_seqlens, token_indices)
-    o = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, scale, cu_seqlens)
-    if head_first:
-        o = rearrange(o, 'b t h d -> b h t d')
-    return o
+    block_indices = parallel_nsa_compression(q, k, v, block_counts, block_size, scale, cu_seqlens, token_indices)
+    return None
+    #o = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, scale, cu_seqlens)
+    #if head_first:
+    #    o = rearrange(o, 'b t h d -> b h t d')
+    #return o

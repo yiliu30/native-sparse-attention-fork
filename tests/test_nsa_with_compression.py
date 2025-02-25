@@ -80,7 +80,7 @@ def test_parallel(
     ref_dg_slc, g_slc.grad = g_slc.grad.clone(), None
     if window_size > 0:
         ref_dg_swa, g_swa.grad = g_swa.grad.clone(), None
-    '''
+
     tri = parallel_nsa_with_compression(
         q=q,
         k=k,
@@ -98,7 +98,6 @@ def test_parallel(
     assert_close("dq", ref_dq, tri_dq, 0.005)
     assert_close("dk", ref_dk, tri_dk, 0.005)
     assert_close("dv", ref_dv, tri_dv, 0.005)
-    '''
 
 @pytest.mark.parametrize("N", [4])
 @pytest.mark.parametrize("T", [64, 128, 200, 250, 256, 300, 400, 512, 1000, 2048])
