@@ -25,13 +25,13 @@ def assert_close(prefix, ref, tri, ratio):
     assert get_err_ratio(ref, tri) < ratio, msg
 
 @pytest.mark.parametrize("B", [1])
-@pytest.mark.parametrize("T", [512, 1024, 2000])
+@pytest.mark.parametrize("T", [256, 1024, 2000])
 @pytest.mark.parametrize("H", [4])
 @pytest.mark.parametrize("HQ", [64])
 @pytest.mark.parametrize("D", [100, 64])
 @pytest.mark.parametrize("S", [16])
 @pytest.mark.parametrize("block_size", [32])
-@pytest.mark.parametrize("window_size", [32])
+@pytest.mark.parametrize("window_size", [0, 32])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("scale", [0.1])
 def test_parallel(

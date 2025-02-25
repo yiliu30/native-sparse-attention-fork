@@ -14,8 +14,9 @@ Efficient Triton implementations for [Native Sparse Attention: Hardware-Aligned 
 
 ## News
 
-- [2025/02/24] We support the fused selected attention and sliding attention triton kernel.
-- [2025/02/21] We support a variable number of selected blocks for queries across different positions and batches.
+- [2025/02/25] Introduced an online top‑k selection kernel that avoids materializing the attention matrix during selection.
+- [2025/02/24] Added support for a fused Triton kernel combining selected attention with sliding attention.
+- [2025/02/21] Enabled handling of a variable number of selected blocks for queries across different positions and batches.
 
 ### Setup
 
@@ -24,20 +25,25 @@ To get started, clone the `native-sparse-attention` repository and install the r
 ```bash
 git clone https://github.com/fla-org/native-sparse-attention.git
 cd native-sparse-attention
-pip install . 
-```
-
-`native-sparse-attention` manages minimal dependencies, only including `fla` as submodules. 
-After installation, initialize and update the submodules:
-```sh
 git submodule update --init --recursive
+pip install . 
 ```
 
 ## Usage
 
-To test the correctness of NSA (The `nsa_with_compression` function is still under development now):
+To test the correctness of NSA:
 ```py
 pytest tests/test_nsa.py
+```
+
+To validate the correctness of NSA with top‑k selection (ignoring the output from the compressed attention), run:
+```py
+pytest tests/test_nsa_with_compression.py
+```
+
+To verify the correctness of the top‑k selection, where sampling Q and K from a uniform distribution produces similar importance scores (resulting in slight variations in the top‑k selection), we validate this component separately. To run the test, execute:
+```py
+pytest tests/test_topk.py
 ```
 
 To measure the efficiency of NSA:
@@ -90,9 +96,9 @@ offsets = torch.cat([
     torch.tensor([T], dtype=torch.long)
 ], 0).cuda().sort()[0]
 # seq-first required for inputs with variable lengths
-q = torch.randn((1, T, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
-k = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-v = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
+q = torch.rand((1, T, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
+k = torch.rand((1, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
+v = torch.rand((1, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
 g_slc = torch.rand((B, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
 g_swa = torch.rand((B, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
 

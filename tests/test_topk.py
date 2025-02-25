@@ -33,8 +33,8 @@ def test_topk(
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    q = torch.randn((B, T, HQ, D), dtype=dtype, device='cuda')
-    k = torch.randn((B, T, H, D), dtype=dtype, device='cuda')
+    q = torch.rand((B, T, HQ, D), dtype=dtype, device='cuda')
+    k = torch.rand((B, T, H, D), dtype=dtype, device='cuda')
     v = torch.randn((B, T, H, D), dtype=dtype, device='cuda')
     g_cmp = torch.rand((B, T, HQ), dtype=dtype, device='cuda')
     g_slc = torch.rand((B, T, HQ), dtype=dtype, device='cuda')
@@ -69,4 +69,4 @@ def test_topk(
         scale=scale
     )
 
-    assert (ref_topk != tri_topk[:, :, :, :ref_topk.shape[-1]]).float().mean() < 0.02
+    assert (ref_topk != tri_topk[:, :, :, :ref_topk.shape[-1]]).float().mean() < 0.005
