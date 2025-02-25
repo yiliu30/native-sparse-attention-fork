@@ -85,8 +85,12 @@ def test_parallel(
         q=q,
         k=k,
         v=v,
+        g_cmp=g_cmp,
+        g_slc=g_slc,
+        g_swa=g_swa,
         block_counts=block_counts,
         block_size=block_size,
+        window_size=window_size,
         scale=scale
     )
     tri.backward(do)

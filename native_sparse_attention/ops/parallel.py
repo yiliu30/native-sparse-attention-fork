@@ -999,8 +999,12 @@ def parallel_nsa_with_compression(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    g_cmp: torch.Tensor,
+    g_slc: torch.Tensor,
+    g_swa: torch.Tensor,
     block_counts: Union[torch.LongTensor, int],
     block_size: int = 64,
+    window_size: int = 0,
     scale: Optional[float] = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = False
@@ -1026,6 +1030,8 @@ def parallel_nsa_with_compression(
             each query can select the same number of blocks.
         block_size (int):
             Selected block size. Default: 64.
+        window_size (int):
+            Sliding window size. Default: 0.
         scale (Optional[int]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -1053,8 +1059,8 @@ def parallel_nsa_with_compression(
 
     token_indices = prepare_token_indices(cu_seqlens) if cu_seqlens is not None else None
     block_indices = parallel_nsa_compression(q, k, v, block_counts, block_size, scale, cu_seqlens, token_indices)
-    return None
-    #o = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, scale, cu_seqlens)
-    #if head_first:
-    #    o = rearrange(o, 'b t h d -> b h t d')
-    #return o
+    o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, window_size, scale, cu_seqlens)
+    o = o_slc * g_slc.unsqueeze(-1) + o_swa * g_swa.unsqueeze(-1) if window_size > 0 else o_slc * g_slc.unsqueeze(-1)
+    if head_first:
+        o = rearrange(o, 'b t h d -> b h t d')
+    return o
