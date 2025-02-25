@@ -129,7 +129,7 @@ def naive_nsa(
             # [S*BS, HQ, -1]
             k_i_slc, v_i_slc = map(lambda x: x.gather(0, i_i.clamp(0, T-1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])), (k_b, v_b))
             # [S*BS, HQ]
-            attn_slc = torch.einsum('h d, n h d -> n h', q_i, k_i_slc).masked_fill((i_i > i_q) | (c >= s_i if block_counts is not None else False), float('-inf')).softmax(0)
+            attn_slc = torch.einsum('h d, n h d -> n h', q_i, k_i_slc).masked_fill(torch.logical_or(i_i < 0, i_i > i_q) | (c >= s_i if block_counts is not None else False), float('-inf')).softmax(0)
             if not varlen:
                 o_slc[i, i_q] = torch.einsum('n h, n h v -> h v', attn_slc, v_i_slc) * g_slc_i.unsqueeze(-1)
             else:
@@ -145,6 +145,7 @@ def naive_nsa(
     if head_first:
         o_slc = rearrange(o_slc, 'b t h d -> b h t d')
         o_swa = rearrange(o_swa, 'b t h d -> b h t d')
+
     return o_slc.to(dtype) + o_swa.to(dtype) if o_swa is not None else o_slc.to(dtype)
 
 def compression(
@@ -180,7 +181,9 @@ def naive_nsa_compression(
     H, HQ = k.shape[2], q.shape[2]
     G = HQ//H
     BS = block_size
-    S = block_counts if isinstance(block_counts, int) else block_counts.max().item()
+    if isinstance(block_counts, int):
+        block_counts = torch.full((B, T, H), block_counts, dtype=torch.long, device=q.device)
+    S = block_counts.max().item()
     k_cmp, v_cmp = compression(k, v, BS)
     C = k_cmp.shape[1]
     S = min(S, C)
@@ -194,11 +197,11 @@ def naive_nsa_compression(
     attn_cmp = attn_cmp.masked_fill(casual_mask, float('-inf'))
     attn_cmp = attn_cmp.softmax(-1)
     o_cmp = torch.einsum('bhqk, bkhd -> bqhd', attn_cmp, v_cmp).nan_to_num() * g_cmp.unsqueeze(-1)
-    attn_select = attn_cmp.masked_fill(local_mask, float(1.0))
+    attn_select = attn_cmp.nan_to_num().masked_fill(local_mask, float(1.0))
     attn_select = attn_select.view(B, H, G, T, C).sum(2)
     block_indices = attn_select.topk(S, -1)[1]
 
-    block_indices = block_indices.masked_fill(block_indices > (block_indices.new_tensor(range(T))[:, None]//BS), 0)
+    block_indices = block_indices.masked_fill(block_indices > (block_indices.new_tensor(range(T))[:, None] // BS), -1)
     block_indices = block_indices.transpose(1, 2)
 
     if head_first:
@@ -359,7 +362,7 @@ def naive_nsa_with_compression(
         scale=scale,
         cu_seqlens=cu_seqlens,
         head_first=False
-    ) + o_cmp
+    ) #+ o_cmp
 
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')

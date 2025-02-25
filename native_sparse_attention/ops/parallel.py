@@ -92,7 +92,10 @@ def parallel_nsa_kernel_compression(
 
         b_mp = b_m
     # [G]
-    b_lse = b_m + tl.log(b_acc)
+    if (i_t + 1) // BS == 0:
+        b_lse = tl.full([G], float(0.0), dtype=tl.float32)
+    else:
+        b_lse = b_m + tl.log(b_acc)
     
 
     ################################
@@ -116,8 +119,7 @@ def parallel_nsa_kernel_compression(
         # the importance scores of the current block
         # [BS]
         b_i, b_ip = tl.sum(b_p, 0), b_i
-        o_i, o_ip = tl.where(o_s <= i_t // BS, o_s, 0), o_i
-
+        o_i, o_ip = tl.where(o_s <= i_t // BS, o_s + 1, 0), o_i
 
         n_dims: core.constexpr = _log2(b_i.shape[0])
         for i in core.static_range(1, n_dims):
@@ -132,7 +134,7 @@ def parallel_nsa_kernel_compression(
             b_i, o_i = _bitonic_merge(b_i, o_i.to(tl.int32), n_dims, True, n_dims)
 
     m_top = tl.arange(0, 2) == 0
-    b_top = tl.sum(m_top[:, None] * tl.reshape(o_i, [2, S]), 0)
+    b_top = tl.sum(m_top[:, None] * tl.reshape(o_i - 1, [2, S]), 0)
 
     p_b = tl.make_block_ptr(block_indices + (bos + i_t) * H*S, (H*S,), (1,), (i_h * S,), (S,), (0,))
     tl.store(p_b, b_top.to(p_b.dtype.element_ty))
@@ -211,7 +213,7 @@ def parallel_nsa_fwd_kernel(
     b_acc_slc = tl.zeros([G], dtype=tl.float32)
     for i in range(NS):
         i_s = tl.load(block_indices + i).to(tl.int32) * BS
-        if i_s <= i_t:
+        if i_s <= i_t and i_s >= 0:
             p_k_slc = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
             p_v_slc = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
             # [BK, BS]
@@ -621,13 +623,15 @@ def parallel_nsa_compression(
     B, T, HQ, K = q.shape
     H = k.shape[2]
     G = HQ // H
-    S = triton.next_power_of_2(block_counts if isinstance(block_counts, int) else block_counts.max().item())
+    S = block_counts if isinstance(block_counts, int) else block_counts.max().item()
+    k_cmp, v_cmp = compression(k, v, block_size)
+    C = k_cmp.shape[1]
+    S = triton.next_power_of_2(S)
     BS = block_size
     BK = triton.next_power_of_2(K)
 
     grid = (T, B * H)
-    k_cmp, v_cmp = compression(k, v, BS)
-    C = k_cmp.shape[1]
+
     block_indices = torch.zeros(B, T, H, S, dtype=torch.long, device=q.device)
 
     parallel_nsa_kernel_compression[grid](
