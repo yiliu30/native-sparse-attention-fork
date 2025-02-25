@@ -58,27 +58,7 @@ def test_parallel(
     do = torch.randn((B, T, HQ, D), dtype=dtype, device='cuda')
 
     block_counts = torch.randint(1, S + 1, (B, T, H), dtype=torch.long, device='cuda')
-
-    tri, tri_topk = parallel_nsa_with_compression(
-        q=q,
-        k=k,
-        v=v,
-        g_cmp=g_cmp,
-        g_slc=g_slc,
-        g_swa=g_swa,
-        block_counts=block_counts,
-        block_size=block_size,
-        window_size=window_size,
-        scale=scale
-    )
-    tri.backward(do)
-    tri_dq, q.grad = q.grad.clone(), None
-    tri_dk, k.grad = k.grad.clone(), None
-    tri_dv, v.grad = v.grad.clone(), None
-    tri_dg_slc, g_slc.grad = g_slc.grad.clone(), None
-    if window_size > 0:
-        tri_dg_swa, g_swa.grad = g_swa.grad.clone(), None
-
+    
     ref = naive_nsa(
         q=q,
         k=k,
@@ -99,6 +79,26 @@ def test_parallel(
     ref_dg_slc, g_slc.grad = g_slc.grad.clone(), None
     if window_size > 0:
         ref_dg_swa, g_swa.grad = g_swa.grad.clone(), None
+
+    tri, tri_topk = parallel_nsa_with_compression(
+        q=q,
+        k=k,
+        v=v,
+        g_cmp=g_cmp,
+        g_slc=g_slc,
+        g_swa=g_swa,
+        block_counts=block_counts,
+        block_size=block_size,
+        window_size=window_size,
+        scale=scale
+    )
+    tri.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+    tri_dg_slc, g_slc.grad = g_slc.grad.clone(), None
+    if window_size > 0:
+        tri_dg_swa, g_swa.grad = g_swa.grad.clone(), None
     
     assert_close(" o", ref, tri, 0.005)
     assert_close("dq", ref_dq, tri_dq, 0.005)
