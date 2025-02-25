@@ -300,7 +300,7 @@ def parallel_nsa_kernel_mask(
     else:
         b_m = b_i * BS <= i_t
 
-    if b_i < NS:
+    if b_i < NS and b_i >= 0:
         tl.store(block_mask + i_b * T * H * NS + i_t * H * NS + i_h * NS + b_i, b_m.to(block_mask.dtype.element_ty))
 
 
@@ -416,7 +416,7 @@ def parallel_nsa_bwd_kernel_dq(
     b_dq_slc = tl.zeros([G, BK], dtype=tl.float32)
     for i in range(NS):
         i_s = tl.load(block_indices + i).to(tl.int32) * BS
-        if i_s <= i_t:
+        if i_s <= i_t and i_s >= 0:
             p_k_slc = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
             p_v_slc = tl.make_block_ptr(v, (V, T), (1, H*V), (i_v * BV, i_s), (BV, BS), (0, 1))
             # [BK, BS]
@@ -1067,4 +1067,4 @@ def parallel_nsa_with_compression(
     o = o_slc * g_slc.unsqueeze(-1) + o_swa * g_swa.unsqueeze(-1) if window_size > 0 else o_slc * g_slc.unsqueeze(-1)
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')
-    return o
+    return o, block_indices

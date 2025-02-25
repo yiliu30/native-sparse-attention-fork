@@ -367,4 +367,4 @@ def naive_nsa_with_compression(
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')
  
-    return o
+    return o, block_indices

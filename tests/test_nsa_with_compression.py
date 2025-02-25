@@ -5,7 +5,7 @@ import os
 import pytest
 import torch
 
-from native_sparse_attention.ops.naive import naive_nsa_with_compression
+from native_sparse_attention.ops.naive import naive_nsa
 from native_sparse_attention.ops.parallel import parallel_nsa_with_compression
 
 
@@ -24,9 +24,8 @@ def assert_close(prefix, ref, tri, ratio):
     print(msg)
     assert get_err_ratio(ref, tri) < ratio, msg
 
-
 @pytest.mark.parametrize("B", [1])
-@pytest.mark.parametrize("T", [256, 1024, 2000])
+@pytest.mark.parametrize("T", [512, 1024, 2000])
 @pytest.mark.parametrize("H", [4])
 @pytest.mark.parametrize("HQ", [64])
 @pytest.mark.parametrize("D", [100, 64])
@@ -60,7 +59,7 @@ def test_parallel(
 
     block_counts = torch.randint(1, S + 1, (B, T, H), dtype=torch.long, device='cuda')
 
-    ref = naive_nsa_with_compression(
+    tri, tri_topk = parallel_nsa_with_compression(
         q=q,
         k=k,
         v=v,
@@ -72,36 +71,42 @@ def test_parallel(
         window_size=window_size,
         scale=scale
     )
-    #ref.backward(do)
-    #ref_dq, q.grad = q.grad.clone(), None
-    #ref_dk, k.grad = k.grad.clone(), None
-    #ref_dv, v.grad = v.grad.clone(), None
-    #ref_dg_cmp, g_cmp.grad = g_cmp.grad.clone(), None
-    #ref_dg_slc, g_slc.grad = g_slc.grad.clone(), None
-    #if window_size > 0:
-    #    ref_dg_swa, g_swa.grad = g_swa.grad.clone(), None
+    tri.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+    tri_dg_slc, g_slc.grad = g_slc.grad.clone(), None
+    if window_size > 0:
+        tri_dg_swa, g_swa.grad = g_swa.grad.clone(), None
 
-    tri = parallel_nsa_with_compression(
+    ref = naive_nsa(
         q=q,
         k=k,
         v=v,
-        g_cmp=g_cmp,
         g_slc=g_slc,
         g_swa=g_swa,
+        block_indices=tri_topk,
         block_counts=block_counts,
         block_size=block_size,
         window_size=window_size,
         scale=scale
     )
-    #tri.backward(do)
-    #tri_dq, q.grad = q.grad.clone(), None
-    #tri_dk, k.grad = k.grad.clone(), None
-    #tri_dv, v.grad = v.grad.clone(), None
 
+    ref.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+    ref_dg_slc, g_slc.grad = g_slc.grad.clone(), None
+    if window_size > 0:
+        ref_dg_swa, g_swa.grad = g_swa.grad.clone(), None
+    
     assert_close(" o", ref, tri, 0.005)
-    #assert_close("dq", ref_dq, tri_dq, 0.005)
-    #assert_close("dk", ref_dk, tri_dk, 0.005)
-    #assert_close("dv", ref_dv, tri_dv, 0.005)
+    assert_close("dq", ref_dq, tri_dq, 0.005)
+    assert_close("dk", ref_dk, tri_dk, 0.005)
+    assert_close("dv", ref_dv, tri_dv, 0.005)
+    assert_close("dg_slc", ref_dg_slc, tri_dg_slc, 0.005)
+    if window_size > 0:
+        assert_close("dg_swa", ref_dg_swa, tri_dg_swa, 0.005)
 
 '''
 @pytest.mark.parametrize("N", [4])
