@@ -119,7 +119,7 @@ def parallel_nsa_kernel_compression(
         b_i, b_ip = tl.sum(b_p, 0), b_i
         o_i, o_ip = tl.where(o_s <= i_t // BS, o_s + 1, 0), o_i
 
-        n_dims: core.constexpr = tl.log2(b_i.shape[0])
+        n_dims: core.constexpr = tl.standard._log2(b_i.shape[0])
         for i in core.static_range(1, n_dims):
             b_i, o_i = _bitonic_merge(b_i, o_i.to(tl.int32), i, 2, n_dims)
 

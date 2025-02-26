@@ -24,6 +24,7 @@ def assert_close(prefix, ref, tri, ratio):
     print(msg)
     assert get_err_ratio(ref, tri) < ratio, msg
 
+
 @pytest.mark.parametrize("B", [1])
 @pytest.mark.parametrize("T", [256, 1024, 2000])
 @pytest.mark.parametrize("H", [4])
@@ -99,7 +100,7 @@ def test_parallel(
     ref_dg_slc, g_slc.grad = g_slc.grad.clone(), None
     if window_size > 0:
         ref_dg_swa, g_swa.grad = g_swa.grad.clone(), None
-    
+
     assert_close(" o", ref, tri, 0.005)
     assert_close("dq", ref_dq, tri_dq, 0.005)
     assert_close("dk", ref_dk, tri_dk, 0.005)
@@ -107,6 +108,7 @@ def test_parallel(
     assert_close("dg_slc", ref_dg_slc, tri_dg_slc, 0.005)
     if window_size > 0:
         assert_close("dg_swa", ref_dg_swa, tri_dg_swa, 0.005)
+
 
 '''
 @pytest.mark.parametrize("N", [4])
