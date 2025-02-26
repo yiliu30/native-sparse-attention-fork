@@ -12,13 +12,13 @@ from native_sparse_attention.ops.parallel import parallel_nsa
         # argument names to use as an x-axis for the plot
         x_names=['T'],
         # different possible values for `x_name`
-        x_vals=[128 * 2 ** i for i in range(0, 8)],
+        x_vals=[1024 * 2 ** i for i in range(0, 6)],
         # argument name whose value corresponds to a different line in the plot
         line_arg='provider',
         # possible values for `line_arg``
-        line_vals=['nsa', 'nsa_bwd', 'flash', 'flash_bwd'],
+        line_vals=['nsa', 'flash', 'nsa_bwd', 'flash_bwd'],
         # label name for the lines
-        line_names=['nsa', 'nsa_bwd', 'flash', 'flash_bwd'],
+        line_names=['nsa', 'flash', 'nsa_bwd', 'flash_bwd'],
         # line styles
         styles=[('green', '-'), ('blue', '-'), ('red', '-'), ('green', 'dotted'),
                 ('blue', 'dotted'), ('red', 'dotted'), ('cyan', '-'), ('cyan', 'dotted')],
