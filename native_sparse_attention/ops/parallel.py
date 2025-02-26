@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import math
 from typing import Optional, Union
 
-import math
 import torch
 import torch.nn.functional as F
 import triton
@@ -14,8 +14,7 @@ from einops import rearrange
 from fla.ops.common.utils import (prepare_chunk_indices, prepare_lens,
                                   prepare_token_indices)
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
-from native_sparse_attention.ops.utils import argsort, _bitonic_merge
-from triton.language.standard import _log2
+from native_sparse_attention.ops.utils import _bitonic_merge
 
 
 @triton.heuristics({
@@ -96,7 +95,6 @@ def parallel_nsa_kernel_compression(
         b_lse = tl.full([G], float(0.0), dtype=tl.float32)
     else:
         b_lse = b_m + tl.log(b_acc)
-    
 
     ################################
     # 2. topk selection
@@ -121,7 +119,7 @@ def parallel_nsa_kernel_compression(
         b_i, b_ip = tl.sum(b_p, 0), b_i
         o_i, o_ip = tl.where(o_s <= i_t // BS, o_s + 1, 0), o_i
 
-        n_dims: core.constexpr = _log2(b_i.shape[0])
+        n_dims: core.constexpr = tl.log2(b_i.shape[0])
         for i in core.static_range(1, n_dims):
             b_i, o_i = _bitonic_merge(b_i, o_i.to(tl.int32), i, 2, n_dims)
 
@@ -469,7 +467,10 @@ def parallel_nsa_bwd_kernel_dq(
             b_dq_swa += tl.dot(b_ds_swa.to(b_k_swa.dtype), tl.trans(b_k_swa))
         b_dq_swa *= scale
 
-    tl.store(p_dq, b_dq_slc.to(p_dq.dtype.element_ty) if WS == 0 else (b_dq_slc + b_dq_swa).to(p_dq.dtype.element_ty), boundary_check=(0, 1))
+    if WS == 0:
+        tl.store(p_dq, b_dq_slc.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
+    else:
+        tl.store(p_dq, (b_dq_slc + b_dq_swa).to(p_dq.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({
@@ -565,6 +566,7 @@ def parallel_nsa_bwd_kernel_dkv(
             b_dk += tl.dot(b_ds_slc.to(b_q.dtype), b_q)
 
         if WS > 0:
+            o_s = i_s * BS + tl.arange(0, BS)
             if max(i_s * BS, i - WS + 1) < min((i_s + 1) * BS, i + 1):
                 p_q = tl.make_block_ptr(q + (bos + i) * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
                 # [G, BK]
@@ -582,7 +584,7 @@ def parallel_nsa_bwd_kernel_dkv(
                 # [BS, G]
                 b_s_swa = tl.dot(b_k, tl.trans(b_q))
                 b_p_swa = tl.exp(b_s_swa - b_lse_swa[None, :])
-                b_p_swa = tl.where((i >= (i_s * BS + tl.arange(0, BS)) and (i - WS) < (i_s * BS + tl.arange(0, BS)))[:, None], b_p_swa, 0)
+                b_p_swa = tl.where((i >= o_s and (i - WS) < o_s)[:, None], b_p_swa, 0)
                 # [BS, G] @ [G, BV] -> [BS, BV]
                 b_dv += tl.dot(b_p_swa.to(b_do_swa.dtype), b_do_swa)
                 # [BS, BV] @ [BV, G] -> [BS, G]
@@ -595,12 +597,14 @@ def parallel_nsa_bwd_kernel_dkv(
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
+
+@torch.compile
 def compression(
     k: torch.Tensor,
     v: torch.Tensor,
     block_size: int
 ) -> torch.Tensor:
-    ### Currently, we set mean pooling as our basic compression function.
+    # Currently, we set mean pooling as our basic compression function.
     B, T, H = k.shape[:3]
     num_block = math.ceil(T / block_size)
     if k.shape[1] % block_size != 0:
@@ -609,6 +613,7 @@ def compression(
     k_cmp = k.view(B, block_size, num_block, H, -1).mean(dim=1)
     v_cmp = v.view(B, block_size, num_block, H, -1).mean(dim=1)
     return k_cmp, v_cmp
+
 
 def parallel_nsa_compression(
     q: torch.Tensor,
@@ -625,7 +630,6 @@ def parallel_nsa_compression(
     G = HQ // H
     S = block_counts if isinstance(block_counts, int) else block_counts.max().item()
     k_cmp, v_cmp = compression(k, v, block_size)
-    C = k_cmp.shape[1]
     S = triton.next_power_of_2(S)
     BS = block_size
     BK = triton.next_power_of_2(K)
@@ -682,8 +686,8 @@ def parallel_nsa_fwd(
 
     grid = (NV, T, B * H)
     o_slc = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
-    lse_slc = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
     o_swa = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device) if window_size > 0 else None
+    lse_slc = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
     lse_swa = torch.empty(B, T, HQ, dtype=torch.float, device=q.device) if window_size > 0 else None
 
     parallel_nsa_fwd_kernel[grid](
@@ -798,7 +802,7 @@ def parallel_nsa_bwd(
         do_slc=do_slc,
         lse_swa=lse_swa,
         delta_swa=delta_swa,
-        do_swa=do_swa,    
+        do_swa=do_swa,
         dq=dq,
         block_indices=block_indices,
         block_counts=block_counts,
@@ -926,6 +930,7 @@ class ParallelNSAFunction(torch.autograd.Function):
         return dq.to(q), dk.to(k), dv.to(v), None, None, None, None, None, None, None, None
 
 
+@torch.compile
 def parallel_nsa(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -993,7 +998,10 @@ def parallel_nsa(
         block_counts = None
 
     o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, window_size, scale, cu_seqlens)
-    o = o_slc * g_slc.unsqueeze(-1) + o_swa * g_swa.unsqueeze(-1) if window_size > 0 else o_slc * g_slc.unsqueeze(-1)
+    if window_size > 0:
+        o = torch.addcmul(o_slc * g_slc.unsqueeze(-1), o_swa, g_swa.unsqueeze(-1))
+    else:
+        o = o_slc * g_slc.unsqueeze(-1)
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')
     return o
