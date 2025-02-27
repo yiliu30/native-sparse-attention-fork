@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import math
 from typing import Optional, Union
 
-import math
 import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
@@ -63,7 +63,7 @@ def naive_nsa(
     """
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    if cu_seqlens is not None:   
+    if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
         if head_first:
             raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
@@ -127,9 +127,13 @@ def naive_nsa(
             else:
                 s_i = s_b
             # [S*BS, HQ, -1]
-            k_i_slc, v_i_slc = map(lambda x: x.gather(0, i_i.clamp(0, T-1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])), (k_b, v_b))
+            k_i_slc, v_i_slc = map(lambda x: x.gather(0, i_i.clamp(
+                0, T-1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])), (k_b, v_b))
             # [S*BS, HQ]
-            attn_slc = torch.einsum('h d, n h d -> n h', q_i, k_i_slc).masked_fill(torch.logical_or(i_i < 0, i_i > i_q) | (c >= s_i if block_counts is not None else False), float('-inf')).softmax(0)
+            attn_slc = torch.einsum('h d, n h d -> n h', q_i, k_i_slc).masked_fill(
+                torch.logical_or(i_i < 0, i_i > i_q) | (c >= s_i if block_counts is not None else False),
+                float('-inf')
+            ).softmax(0)
             if not varlen:
                 o_slc[i, i_q] = torch.einsum('n h, n h v -> h v', attn_slc, v_i_slc) * g_slc_i.unsqueeze(-1)
             else:
@@ -147,6 +151,7 @@ def naive_nsa(
         o_swa = rearrange(o_swa, 'b t h d -> b h t d')
 
     return o_slc.to(dtype) + o_swa.to(dtype) if o_swa is not None else o_slc.to(dtype)
+
 
 def compression(
     k: torch.Tensor,
@@ -166,6 +171,7 @@ def compression(
     v_cmp = v.view(B, block_size, num_block, H, -1).mean(dim=1)
     return k_cmp, v_cmp
 
+
 def naive_nsa_compression(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -183,12 +189,11 @@ def naive_nsa_compression(
     BS = block_size
     if isinstance(block_counts, int):
         block_counts = torch.full((B, T, H), block_counts, dtype=torch.long, device=q.device)
-    S = block_counts.max().item()
+    q, k, v = map(lambda x: x.float(), (q, k, v))
     k_cmp, v_cmp = compression(k, v, BS)
     C = k_cmp.shape[1]
-    S = min(S, C)
+    S = min(block_counts.max().item(), C)
     k_cmp, v_cmp = map(lambda x: repeat(x, 'b c h d -> b c (h g) d', g=G), (k_cmp, v_cmp))
-    q, k_cmp, v_cmp = map(lambda x: x.float(), (q, k_cmp, v_cmp))
 
     casual_mask = ((torch.arange(T) - BS + 1)[:, None] // BS < torch.arange(C)[None, :]).to(q.device)
     local_mask = (torch.arange(T)[:, None] // BS == torch.arange(C)[None, :]).to(q.device)
@@ -207,6 +212,7 @@ def naive_nsa_compression(
     if head_first:
         o_cmp = rearrange(o_cmp, 'b t h d -> b h t d')
     return block_indices, o_cmp.to(dtype)
+
 
 def naive_nsa_compression_varlen(
     q: torch.Tensor,
@@ -241,7 +247,7 @@ def naive_nsa_compression_varlen(
             s_b = block_counts[0][cu_seqlens[i]:cu_seqlens[i+1]]
         else:
             s_b = block_counts
-        
+
         k_cmp, v_cmp = compression(k_b.unsqueeze(0), v_b.unsqueeze(0), BS)
         S_b = s_b if isinstance(s_b, int) else s_b.max().item()
         C_b = k_cmp.shape[1]
@@ -255,11 +261,15 @@ def naive_nsa_compression_varlen(
         attn_cmp = torch.einsum('qhd,khd->hqk', q_b*scale, k_cmp)
         attn_cmp = attn_cmp.masked_fill(casual_mask, float('-inf'))
         attn_cmp = attn_cmp.softmax(-1)
-        o_cmp[0][cu_seqlens[i]:cu_seqlens[i+1]] = torch.einsum('hqk, khd -> qhd', attn_cmp, v_cmp).nan_to_num() * g_cmp_b.unsqueeze(-1)
+        o_cmp[0][cu_seqlens[i]:cu_seqlens[i+1]] = torch.einsum('hqk,khd->qhd', attn_cmp, v_cmp).nan_to_num() *\
+            g_cmp_b.unsqueeze(-1)
         attn_select = attn_cmp.masked_fill(local_mask, float(1.0))
         attn_select = attn_select.view(H, G, T_b, C_b).sum(1)
         block_indices_b = attn_select.topk(S_b, -1)[1]
-        block_indices_b = block_indices_b.masked_fill(block_indices_b > (block_indices_b.new_tensor(range(T_b))[:, None]//BS), 0)
+        block_indices_b = block_indices_b.masked_fill(
+            block_indices_b > (block_indices_b.new_tensor(range(T_b))[:, None]//BS),
+            0
+        )
         block_indices[0][cu_seqlens[i]:cu_seqlens[i+1], :, :S_b] = block_indices_b.transpose(0, 1)
 
     if head_first:
@@ -330,23 +340,23 @@ def naive_nsa_with_compression(
             block_counts = rearrange(block_counts, 'b h t -> b t h')
     if cu_seqlens is not None:
         block_indices, o_cmp = naive_nsa_compression_varlen(
-            q=q, 
-            k=k, 
-            v=v, 
-            g_cmp=g_cmp, 
-            block_counts=block_counts, 
-            block_size=block_size, 
+            q=q,
+            k=k,
+            v=v,
+            g_cmp=g_cmp,
+            block_counts=block_counts,
+            block_size=block_size,
             scale=scale,
             cu_seqlens=cu_seqlens,
             head_first=False)
     else:
         block_indices, o_cmp = naive_nsa_compression(
-            q=q, 
-            k=k, 
-            v=v, 
-            g_cmp=g_cmp, 
-            block_counts=block_counts, 
-            block_size=block_size, 
+            q=q,
+            k=k,
+            v=v,
+            g_cmp=g_cmp,
+            block_counts=block_counts,
+            block_size=block_size,
             scale=scale,
             head_first=False)
     o = naive_nsa(
@@ -362,9 +372,9 @@ def naive_nsa_with_compression(
         scale=scale,
         cu_seqlens=cu_seqlens,
         head_first=False
-    ) #+ o_cmp
+    ) + o_cmp
 
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')
- 
+
     return o, block_indices
