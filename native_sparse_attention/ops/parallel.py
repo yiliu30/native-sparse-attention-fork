@@ -776,12 +776,33 @@ def parallel_nsa_compression(
         )
     else:
         o, lse = None, None
+    return k_cmp, v_cmp, o, lse
+
+
+def parallel_nsa_topk(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    lse: torch.Tensor,
+    block_counts: Union[torch.LongTensor, int],
+    block_size: int = 64,
+    scale: float = None,
+    offsets: Optional[torch.LongTensor] = None,
+    token_indices: Optional[torch.LongTensor] = None
+) -> torch.LongTensor:
+    B, T, HQ, K = q.shape
+    H = k.shape[2]
+    G = HQ // H
+    S = block_counts if isinstance(block_counts, int) else block_counts.max().item()
+    S = triton.next_power_of_2(S)
+    # here we set BC = BS, but beware that they are actually decoupled
+    BC = BS = block_size
+    BK = triton.next_power_of_2(K)
 
     block_indices = torch.zeros(B, T, H, S, dtype=torch.long, device=q.device)
     grid = (T, B * H)
     parallel_nsa_kernel_topk[grid](
         q=q,
-        k=k_cmp,
+        k=k,
         lse=lse,
         scale=scale,
         block_indices=block_indices,
@@ -797,7 +818,7 @@ def parallel_nsa_compression(
         BS=BS,
         BK=BK
     )
-    return block_indices, o
+    return block_indices
 
 
 def parallel_nsa_fwd(
@@ -1214,7 +1235,7 @@ def parallel_nsa_with_compression(
     assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
 
     token_indices = prepare_token_indices(cu_seqlens) if cu_seqlens is not None else None
-    block_indices, o_cmp = parallel_nsa_compression(
+    k_cmp, _, o_cmp, lse_cmp = parallel_nsa_compression(
         q=q,
         k=k,
         v=v,
@@ -1224,6 +1245,16 @@ def parallel_nsa_with_compression(
         offsets=cu_seqlens,
         token_indices=token_indices,
         output_compression=g_cmp is not None
+    )
+    block_indices = parallel_nsa_topk(
+        q=q,
+        k=k_cmp,
+        lse=lse_cmp,
+        block_counts=block_counts,
+        block_size=block_size,
+        scale=scale,
+        offsets=cu_seqlens,
+        token_indices=token_indices
     )
     o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, window_size, scale, cu_seqlens)
 
