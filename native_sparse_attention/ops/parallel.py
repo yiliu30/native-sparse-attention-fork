@@ -177,7 +177,7 @@ def parallel_nsa_fwd_kernel(
     USE_OFFSETS: tl.constexpr,
     USE_BLOCK_COUNTS: tl.constexpr
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_t, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
 
     if USE_OFFSETS:
@@ -289,7 +289,7 @@ def parallel_nsa_kernel_mask(
     NS: tl.constexpr,
     USE_BLOCK_COUNTS: tl.constexpr
 ):
-    i_b, i_t, i_hs = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_t, i_b, i_hs = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_h, i_s = i_hs // S, i_hs % S
 
     b_i = tl.load(block_indices + i_b * T * H * S + i_t * H * S + i_h * S + i_s)
@@ -364,7 +364,7 @@ def parallel_nsa_bwd_kernel_dq(
     USE_OFFSETS: tl.constexpr,
     USE_BLOCK_COUNTS: tl.constexpr
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_t, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
 
     if USE_OFFSETS:
@@ -684,7 +684,7 @@ def parallel_nsa_fwd(
     NV = triton.cdiv(V, BV)
     assert NK == 1, "The key dimension can not be larger than 256"
 
-    grid = (NV, T, B * H)
+    grid = (T, NV, B * H)
     o_slc = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
     o_swa = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device) if window_size > 0 else None
     lse_slc = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
@@ -732,7 +732,7 @@ def parallel_nsa_block_mask(
         NS = triton.cdiv(T, BS)
     block_mask = torch.zeros(B, T, H, NS, dtype=torch.bool, device=block_indices.device)
 
-    parallel_nsa_kernel_mask[(B, T, H*S)](
+    parallel_nsa_kernel_mask[(T, B, H*S)](
         block_indices=block_indices,
         block_counts=block_counts,
         block_mask=block_mask,
@@ -792,7 +792,7 @@ def parallel_nsa_bwd(
     delta_swa = parallel_nsa_bwd_preprocess(o_swa, do_swa) if window_size > 0 else None
 
     dq = torch.empty(NV, *q.shape, dtype=q.dtype if NV == 1 else torch.float, device=q.device)
-    grid = (NV, T, B * H)
+    grid = (T, NV, B * H)
     parallel_nsa_bwd_kernel_dq[grid](
         q=q,
         k=k,
@@ -992,6 +992,7 @@ def parallel_nsa(
         g_slc, g_swa = map(lambda x: rearrange(x, 'b h t -> b t h'), (g_slc, g_swa))
         if isinstance(block_counts, torch.Tensor):
             block_counts = rearrange(block_counts, 'b h t -> b t h')
+    assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
 
     if isinstance(block_counts, int):
         block_indices = block_indices[:, :, :, :block_counts]
@@ -1058,7 +1059,6 @@ def parallel_nsa_with_compression(
             Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
     """
     assert block_counts is not None, "block counts must be provided for selection"
-
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if cu_seqlens is not None:
@@ -1068,6 +1068,7 @@ def parallel_nsa_with_compression(
         g_cmp, g_slc = map(lambda x: rearrange(x, 'b h t -> b t h'), (g_cmp, g_slc))
         if not isinstance(block_counts, int):
             block_counts = rearrange(block_counts, 'b h t -> b t h')
+    assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
 
     token_indices = prepare_token_indices(cu_seqlens) if cu_seqlens is not None else None
     block_indices = parallel_nsa_compression(q, k, v, block_counts, block_size, scale, cu_seqlens, token_indices)
