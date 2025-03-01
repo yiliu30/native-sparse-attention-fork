@@ -5,8 +5,9 @@ import math
 from typing import Optional, Union
 
 import torch
-import torch.nn.functional as F
 from einops import rearrange, repeat
+
+from native_sparse_attention.ops.parallel import compression
 
 
 def naive_nsa(
@@ -153,25 +154,6 @@ def naive_nsa(
     return o_slc.to(dtype) + o_swa.to(dtype) if o_swa is not None else o_slc.to(dtype)
 
 
-def compression(
-    k: torch.Tensor,
-    v: torch.Tensor,
-    block_size: int
-) -> torch.Tensor:
-    """
-    Currently, we set mean pooling as our basic compression function.
-    We pad the incomplete blocks during compression for consistency, but the incomplete blocks won't be used later.
-    """
-    B, T, H = k.shape[:3]
-    num_block = math.ceil(T / block_size)
-    if k.shape[1] % block_size != 0:
-        k = F.pad(k, (0, 0, 0, 0, 0, num_block * block_size - T))
-        v = F.pad(v, (0, 0, 0, 0, 0, num_block * block_size - T))
-    k_cmp = k.view(B, block_size, num_block, H, -1).mean(dim=1)
-    v_cmp = v.view(B, block_size, num_block, H, -1).mean(dim=1)
-    return k_cmp, v_cmp
-
-
 def naive_nsa_compression(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -196,13 +178,14 @@ def naive_nsa_compression(
     k_cmp, v_cmp = map(lambda x: repeat(x, 'b c h d -> b c (h g) d', g=G), (k_cmp, v_cmp))
 
     casual_mask = ((torch.arange(T) - BS + 1)[:, None] // BS < torch.arange(C)[None, :]).to(q.device)
+    empty_mask = casual_mask.all(-1, True)
     local_mask = (torch.arange(T)[:, None] // BS == torch.arange(C)[None, :]).to(q.device)
 
     attn_cmp = torch.einsum('bqhd,bkhd->bhqk', q*scale, k_cmp)
-    attn_cmp = attn_cmp.masked_fill(casual_mask, float('-inf'))
-    attn_cmp = attn_cmp.softmax(-1)
-    o_cmp = torch.einsum('bhqk, bkhd -> bqhd', attn_cmp, v_cmp).nan_to_num() * g_cmp.unsqueeze(-1)
-    attn_select = attn_cmp.nan_to_num().masked_fill(local_mask, float(1.0))
+    attn_cmp = attn_cmp.masked_fill(casual_mask & empty_mask.logical_not(), float('-inf'))
+    attn_cmp = attn_cmp.softmax(-1).masked_fill(empty_mask, 0.0)
+    o_cmp = torch.einsum('bhqk, bkhd -> bqhd', attn_cmp, v_cmp) * g_cmp.unsqueeze(-1)
+    attn_select = attn_cmp.masked_fill(local_mask, float(1.0))
     attn_select = attn_select.view(B, H, G, T, C).sum(2)
     block_indices = attn_select.topk(S, -1)[1]
 
