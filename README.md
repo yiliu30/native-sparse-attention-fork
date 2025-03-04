@@ -36,14 +36,9 @@ To test the correctness of NSA:
 pytest tests/test_nsa.py
 ```
 
-To validate the correctness of NSA with top‑k selection (ignoring the output from the compressed attention), run the command below. Please note that the initial trial may take some time as the kernel compiles, but subsequent runs will be faster.
+To validate the correctness of NSA with top‑k selection, run the command below. Please note that the initial trial may take some time as the kernel compiles, but subsequent runs will be faster.
 ```py
 pytest tests/test_nsa_with_compression.py
-```
-
-To verify the correctness of the top‑k selection, where sampling Q and K from a uniform distribution produces similar importance scores (resulting in slight variations in the top‑k selection), we validate this component separately. To run the test, execute:
-```py
-pytest tests/test_topk.py
 ```
 
 To measure the efficiency of NSA:
