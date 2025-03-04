@@ -52,9 +52,12 @@ def test_parallel(
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    q = torch.randn((B, T, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
-    k = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-    v = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
+    perm_q = torch.randperm(T, device='cuda')
+    perm_k = torch.randperm(T, device='cuda')
+    perm_v = torch.randperm(T, device='cuda')
+    q = torch.linspace(0, 1, steps=T, dtype=dtype, device='cuda')[perm_q].view(1, T, 1, 1).expand(B, T, HQ, D).clone().requires_grad_(True)
+    k = torch.linspace(0, 1, steps=T, dtype=dtype, device='cuda')[perm_k].view(1, T, 1, 1).expand(B, T, H, D).clone().requires_grad_(True)
+    v = torch.linspace(0, 1, steps=T, dtype=dtype, device='cuda')[perm_v].view(1, T, 1, 1).expand(B, T, H, D).clone().requires_grad_(True)
     g_slc = torch.rand((B, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
     g_swa = torch.rand((B, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
     do = torch.randn((B, T, HQ, D), dtype=dtype, device='cuda')
@@ -147,9 +150,12 @@ def test_parallel_varlen(
         torch.tensor([T], dtype=torch.long)
     ], 0).cuda().sort()[0]
     # seq-first required for inputs with variable lengths
-    q = torch.randn((1, T, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
-    k = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-    v = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
+    perm_q = torch.randperm(T, device='cuda')
+    perm_k = torch.randperm(T, device='cuda')
+    perm_v = torch.randperm(T, device='cuda')
+    q = torch.linspace(0, 1, steps=T, dtype=dtype, device='cuda')[perm_q].view(1, T, 1, 1).expand(1, T, HQ, D).clone().requires_grad_(True)
+    k = torch.linspace(0, 1, steps=T, dtype=dtype, device='cuda')[perm_k].view(1, T, 1, 1).expand(1, T, H, D).clone().requires_grad_(True)
+    v = torch.linspace(0, 1, steps=T, dtype=dtype, device='cuda')[perm_v].view(1, T, 1, 1).expand(1, T, H, D).clone().requires_grad_(True)
     g_slc = torch.rand((1, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
     g_swa = torch.rand((1, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
     do = torch.randn((1, T, HQ, D), dtype=dtype, device='cuda')
