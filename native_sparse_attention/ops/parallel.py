@@ -910,8 +910,8 @@ def compression(
     if k.shape[1] % block_size != 0:
         k = F.pad(k, (0, 0, 0, 0, 0, num_block * block_size - T))
         v = F.pad(v, (0, 0, 0, 0, 0, num_block * block_size - T))
-    k_cmp = k.view(B, block_size, num_block, H, -1).mean(dim=1)
-    v_cmp = v.view(B, block_size, num_block, H, -1).mean(dim=1)
+    k_cmp = k.view(B, num_block, block_size, H, -1).mean(dim=2)
+    v_cmp = v.view(B, num_block, block_size, H, -1).mean(dim=2)
     return k_cmp, v_cmp
 
 
