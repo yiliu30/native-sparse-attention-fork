@@ -1367,7 +1367,7 @@ def parallel_nsa_bwd(
     dk = dk.sum(0)
     return dq, dk, dv
 
-
+@torch.compile
 class ParallelNSAFunction(torch.autograd.Function):
 
     @staticmethod
@@ -1448,7 +1448,6 @@ def parallel_nsa_compression(
     )
 
 
-@torch.compile
 def parallel_nsa(
     q: torch.Tensor,
     k: torch.Tensor,

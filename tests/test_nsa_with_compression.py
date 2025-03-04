@@ -5,7 +5,7 @@ import os
 import pytest
 import torch
 
-from native_sparse_attention.ops.naive import naive_nsa
+from native_sparse_attention.ops.naive import naive_nsa_with_compression
 from native_sparse_attention.ops.parallel import parallel_nsa_with_compression
 
 
@@ -50,9 +50,13 @@ def test_parallel(
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    q = torch.randn((B, T, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
-    k = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-    v = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
+
+    perm_q = torch.randperm(T, device='cuda')
+    perm_k = torch.randperm(T, device='cuda')
+    perm_v = torch.randperm(T, device='cuda')
+    q = torch.linspace(0, 1, steps=T, dtype=dtype, device='cuda').view(1, T, 1, 1).expand(B, T, HQ, D).clone().requires_grad_(True)
+    k = torch.linspace(0, 1, steps=T, dtype=dtype, device='cuda').view(1, T, 1, 1).expand(B, T, H, D).clone().requires_grad_(True)
+    v = torch.linspace(0, 1, steps=T, dtype=dtype, device='cuda').view(1, T, 1, 1).expand(B, T, H, D).clone().requires_grad_(True)
     g_cmp = torch.rand((B, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
     g_slc = torch.rand((B, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
     g_swa = torch.rand((B, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
@@ -77,27 +81,31 @@ def test_parallel(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
     tri_dg_slc, g_slc.grad = g_slc.grad.clone(), None
+    tri_dg_cmp, g_cmp.grad = g_cmp.grad.clone(), None
     if window_size > 0:
         tri_dg_swa, g_swa.grad = g_swa.grad.clone(), None
 
-    ref = naive_nsa(
+    ref, ref_topk = naive_nsa_with_compression(
         q=q,
         k=k,
         v=v,
+        g_cmp=g_cmp,
         g_slc=g_slc,
         g_swa=g_swa,
-        block_indices=tri_topk,
         block_counts=block_counts,
         block_size=block_size,
         window_size=window_size,
         scale=scale
     )
 
+    print((ref_topk != tri_topk[:, :, :, :ref_topk.shape[-1]]).float().mean())
+
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
     ref_dg_slc, g_slc.grad = g_slc.grad.clone(), None
+    ref_dg_cmp, g_cmp.grad = g_cmp.grad.clone(), None
     if window_size > 0:
         ref_dg_swa, g_swa.grad = g_swa.grad.clone(), None
 
@@ -106,6 +114,7 @@ def test_parallel(
     assert_close("dk", ref_dk, tri_dk, 0.005)
     assert_close("dv", ref_dv, tri_dv, 0.005)
     assert_close("dg_slc", ref_dg_slc, tri_dg_slc, 0.005)
+    assert_close("dg_cmp", ref_dg_cmp, tri_dg_cmp, 0.005)
     if window_size > 0:
         assert_close("dg_swa", ref_dg_swa, tri_dg_swa, 0.005)
 
