@@ -1,5 +1,5 @@
 [project]
-name = "fla"
+name = "native_sparse_attention"
 dynamic = ["version"]
 description = "Trtion kernels for Native Sparse Attention"
 readme = "README.md"
@@ -29,7 +29,7 @@ conv1d = ["causal-conv1d>=1.4.0"]
 dev = ["pytest"]
 
 [project.urls]
-Homepage = "https://github.com/fla-org/flash-linear-attention"
+Homepage = "https://github.com/fla-org/native-sparse-attention"
 
 [build-system]
 requires = ["setuptools>=45", "wheel", "ninja", "torch"]

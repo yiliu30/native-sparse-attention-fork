@@ -12,20 +12,20 @@ with open('README.md') as f:
 
 
 def get_package_version():
-    with open(Path(os.path.dirname(os.path.abspath(__file__))) / 'fla' / '__init__.py') as f:
+    with open(Path(os.path.dirname(os.path.abspath(__file__))) / 'native_sparse_attention' / '__init__.py') as f:
         version_match = re.search(r"^__version__\s*=\s*(.*)$", f.read(), re.MULTILINE)
     return ast.literal_eval(version_match.group(1))
 
 
 setup(
-    name='fla',
+    name='native_sparse_attention',
     version=get_package_version(),
     description='Trtion kernels for Native Sparse Attention',
     long_description=long_description,
     long_description_content_type='text/markdown',
     author='Songlin Yang, Yu Zhang',
     author_email='yangsl66@mit.edu, yzhang.cs@outlook.com',
-    url='https://github.com/fla-org/flash-linear-attention',
+    url='https://github.com/fla-org/native-sparse-attention',
     packages=find_packages(),
     license='MIT',
     classifiers=[
