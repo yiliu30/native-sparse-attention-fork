@@ -83,8 +83,8 @@ def parallel_nsa_compression_fwd_kernel(
     for i_c in range(0, NC, BC):
         o_c = i_c + tl.arange(0, BC)
 
-        p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
-        p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (TC, V), (H*V, 1), (i_c, i_v * BV), (BC, BV), (1, 0))
+        p_k = tl.make_block_ptr(k + (tl.cdiv(bos, BS) * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
+        p_v = tl.make_block_ptr(v + (tl.cdiv(bos, BS) * H + i_h) * V, (TC, V), (H*V, 1), (i_c, i_v * BV), (BC, BV), (1, 0))
         # [BK, BC]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [BC, BV]
@@ -194,8 +194,8 @@ def parallel_nsa_compression_bwd_kernel_dq(
     b_dq = tl.zeros([G, BK], dtype=tl.float32)
     for i_c in range(0, NC, BC):
         o_c = i_c + tl.arange(0, BC)
-        p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
-        p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (V, TC), (1, H*V), (i_v * BV, i_c), (BV, BC), (0, 1))
+        p_k = tl.make_block_ptr(k + (tl.cdiv(bos, BS) * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
+        p_v = tl.make_block_ptr(v + (tl.cdiv(bos, BS) * H + i_h) * V, (V, TC), (1, H*V), (i_v * BV, i_c), (BV, BC), (0, 1))
         # [BK, BC]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [BV, BC]
@@ -264,10 +264,10 @@ def parallel_nsa_compression_bwd_kernel_dkv(
     # the number of compression representations in total
     TC = tl.cdiv(T, BS)
 
-    p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (TC, K), (H*K, 1), (i_c * BC, 0), (BC, BK), (1, 0))
-    p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (TC, V), (H*V, 1), (i_c * BC, i_v * BV), (BC, BV), (1, 0))
-    p_dk = tl.make_block_ptr(dk + (i_v * B*T*H + bos * H + i_h) * K, (TC, K), (H*K, 1), (i_c * BC, 0), (BC, BK), (1, 0))
-    p_dv = tl.make_block_ptr(dv + (i_v * B*T*H + bos * H + i_h) * V, (TC, V), (H*V, 1), (i_c * BC, i_v * BV), (BC, BV), (1, 0))
+    p_k = tl.make_block_ptr(k + (tl.cdiv(bos, BS) * H + i_h) * K, (TC, K), (H*K, 1), (i_c * BC, 0), (BC, BK), (1, 0))
+    p_v = tl.make_block_ptr(v + (tl.cdiv(bos, BS) * H + i_h) * V, (TC, V), (H*V, 1), (i_c * BC, i_v * BV), (BC, BV), (1, 0))
+    p_dk = tl.make_block_ptr(dk + (i_v * B*T*H + tl.cdiv(bos, BS) * H + i_h) * K, (TC, K), (H*K, 1), (i_c * BC, 0), (BC, BK), (1, 0))
+    p_dv = tl.make_block_ptr(dv + (i_v * B*T*H + tl.cdiv(bos, BS) * H + i_h) * V, (TC, V), (H*V, 1), (i_c * BC, i_v * BV), (BC, BV), (1, 0))
 
     # [BC, BK]
     b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -365,7 +365,7 @@ def parallel_nsa_kernel_topk(
     # 1. lse computation
     ################################
     if lse is not None:
-        b_lse = tl.load(lse + (bos + i_t) * HQ + i_h * G + tl.arange(0, G))
+        b_lse = tl.load(lse + (tl.cdiv(bos, BS) + i_t) * HQ + i_h * G + tl.arange(0, G))
     else:
         # max scores for the current block
         b_m = tl.full([G], float('-inf'), dtype=tl.float32)
@@ -374,7 +374,7 @@ def parallel_nsa_kernel_topk(
         for i_c in range(0, NC, BC):
             o_c = i_c + tl.arange(0, BC)
 
-            p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
+            p_k = tl.make_block_ptr(k + (tl.cdiv(bos, BS) * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
             # [BK, BC]
             b_k = tl.load(p_k, boundary_check=(0, 1))
 
@@ -406,7 +406,7 @@ def parallel_nsa_kernel_topk(
     for i_c in range(0, i_t // BS + 1, BC):
         o_c = i_c + tl.arange(0, BC)
 
-        p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
+        p_k = tl.make_block_ptr(k + (tl.cdiv(bos, BS) * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
         # [BK, BC]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [G, BC]
@@ -432,6 +432,7 @@ def parallel_nsa_kernel_topk(
             b_i, o_i = _bitonic_merge(b_i, o_i.to(tl.int32), n_dims, True, n_dims)
 
     m_top = tl.arange(0, 2) == 0
+        
     b_top = tl.sum(m_top[:, None] * tl.reshape(o_i - 1, [2, S]), 0)
 
     p_b = tl.make_block_ptr(block_indices + (bos + i_t) * H*S, (H*S,), (1,), (i_h * S,), (S,), (0,))
@@ -569,6 +570,7 @@ def parallel_nsa_fwd_kernel(
 
             b_mp_swa = b_m_swa
         b_o_swa = b_o_swa / b_acc_swa[:, None]
+
         b_m_swa += tl.log(b_acc_swa)
         tl.store(p_o_swa, b_o_swa.to(p_o_swa.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_lse_swa, b_m_swa.to(p_lse_swa.dtype.element_ty))
@@ -1514,7 +1516,6 @@ def parallel_nsa(
     if isinstance(block_counts, int):
         block_indices = block_indices[:, :, :, :block_counts]
         block_counts = None
-
     o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, window_size, scale, cu_seqlens)
     if window_size > 0:
         o = torch.addcmul(o_slc * g_slc.unsqueeze(-1), o_swa, g_swa.unsqueeze(-1))
@@ -1608,7 +1609,7 @@ def parallel_nsa_with_compression(
         offsets=cu_seqlens
     )
     o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, window_size, scale, cu_seqlens)
-
+    pos = torch.arange(0, q.shape[1]).view(1, q.shape[1], 1).to(q.device).to(block_indices.dtype)
     o = o_slc * g_slc.unsqueeze(-1)
     if o_cmp is not None:
         o = torch.addcmul(o, o_cmp, g_cmp.unsqueeze(-1))
