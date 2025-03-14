@@ -266,8 +266,10 @@ def parallel_nsa_compression_bwd_kernel_dkv(
 
     p_k = tl.make_block_ptr(k + (tl.cdiv(bos, BS) * H + i_h) * K, (TC, K), (H*K, 1), (i_c * BC, 0), (BC, BK), (1, 0))
     p_v = tl.make_block_ptr(v + (tl.cdiv(bos, BS) * H + i_h) * V, (TC, V), (H*V, 1), (i_c * BC, i_v * BV), (BC, BV), (1, 0))
-    p_dk = tl.make_block_ptr(dk + (i_v * B*T*H + tl.cdiv(bos, BS) * H + i_h) * K, (TC, K), (H*K, 1), (i_c * BC, 0), (BC, BK), (1, 0))
-    p_dv = tl.make_block_ptr(dv + (i_v * B*T*H + tl.cdiv(bos, BS) * H + i_h) * V, (TC, V), (H*V, 1), (i_c * BC, i_v * BV), (BC, BV), (1, 0))
+    p_dk = tl.make_block_ptr(dk + (i_v * B*T*H + tl.cdiv(bos, BS) * H + i_h) * K,
+                             (TC, K), (H*K, 1), (i_c * BC, 0), (BC, BK), (1, 0))
+    p_dv = tl.make_block_ptr(dv + (i_v * B*T*H + tl.cdiv(bos, BS) * H + i_h) * V,
+                             (TC, V), (H*V, 1), (i_c * BC, i_v * BV), (BC, BV), (1, 0))
 
     # [BC, BK]
     b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -310,6 +312,7 @@ def parallel_nsa_compression_bwd_kernel_dkv(
 
 
 @triton.heuristics({
+    'BC2': lambda args: args['BC'] // 2,
     'USE_OFFSETS': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
@@ -335,6 +338,7 @@ def parallel_nsa_kernel_topk(
     K: tl.constexpr,
     S: tl.constexpr,
     BC: tl.constexpr,
+    BC2: tl.constexpr,
     BS: tl.constexpr,
     BK: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
@@ -402,7 +406,7 @@ def parallel_nsa_kernel_topk(
     # [BC]
     b_i = tl.full([BC], -1, dtype=tl.float32)
     o_i = tl.zeros([BC], dtype=tl.int32)
-    m_i = tl.arange(0, BC) < S
+    m_i = tl.arange(0, BC) < BC2
     for i_c in range(0, i_t // BS + 1, BC):
         o_c = i_c + tl.arange(0, BC)
 
@@ -432,8 +436,7 @@ def parallel_nsa_kernel_topk(
             b_i, o_i = _bitonic_merge(b_i, o_i.to(tl.int32), n_dims, True, n_dims)
 
     m_top = tl.arange(0, 2) == 0
-        
-    b_top = tl.sum(m_top[:, None] * tl.reshape(o_i - 1, [2, S]), 0)
+    b_top = tl.sum(m_top[:, None] * tl.reshape(o_i - 1, [2, BC2]), 0)
 
     p_b = tl.make_block_ptr(block_indices + (bos + i_t) * H*S, (H*S,), (1,), (i_h * S,), (S,), (0,))
     tl.store(p_b, b_top.to(p_b.dtype.element_ty))
@@ -1369,6 +1372,7 @@ def parallel_nsa_bwd(
     dk = dk.sum(0)
     return dq, dk, dv
 
+
 @torch.compile
 class ParallelNSAFunction(torch.autograd.Function):
 
@@ -1609,7 +1613,6 @@ def parallel_nsa_with_compression(
         offsets=cu_seqlens
     )
     o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, window_size, scale, cu_seqlens)
-    pos = torch.arange(0, q.shape[1]).view(1, q.shape[1], 1).to(q.device).to(block_indices.dtype)
     o = o_slc * g_slc.unsqueeze(-1)
     if o_cmp is not None:
         o = torch.addcmul(o, o_cmp, g_cmp.unsqueeze(-1))
