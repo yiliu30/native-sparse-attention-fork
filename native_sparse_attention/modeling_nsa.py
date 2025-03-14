@@ -35,8 +35,9 @@ class NativeSparseAttention(nn.Module):
     def __init__(
         self,
         hidden_size: int = 2048,
-        num_heads: int = 32,
-        num_kv_heads: Optional[int] = None,
+        num_heads: int = 64,
+        num_kv_heads: Optional[int] = 4,
+        head_dim: int = 64,
         qkv_bias: bool = False,
         block_size: Optional[int] = 64,
         block_counts: Optional[Union[torch.LongTensor, int]] = 16,
@@ -54,8 +55,7 @@ class NativeSparseAttention(nn.Module):
         else:
             self.num_kv_heads = num_kv_heads
         self.num_kv_groups = num_heads // self.num_kv_heads
-        self.head_dim = self.hidden_size // self.num_heads
-        self.kv_dim = self.num_kv_heads * self.head_dim
+        self.head_dim = head_dim
         self.kv_dim = self.num_kv_heads * self.head_dim
         self.qkv_bias = qkv_bias
 
@@ -66,11 +66,11 @@ class NativeSparseAttention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
         self.layer_idx = layer_idx
 
-        self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
+        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=self.qkv_bias)
         self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
         self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
         self.g_proj = nn.Linear(self.hidden_size, self.num_heads * 3, bias=False)
-        self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+        self.o_proj = nn.Linear(self.kv_dim, self.hidden_size, bias=False)
 
         self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
 
@@ -128,7 +128,7 @@ class NativeSparseAttention(nn.Module):
                 k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
-        o = parallel_nsa_with_compression(
+        o, _ = parallel_nsa_with_compression(
             q=q,
             k=k,
             v=v,
@@ -138,7 +138,6 @@ class NativeSparseAttention(nn.Module):
             block_size=self.block_size,
             block_counts=self.block_counts,
             window_size=self.window_size,
-            cu_seqlens=cu_seqlens,
             head_first=False
         )
         o = o.reshape(batch_size, seq_len, -1)
