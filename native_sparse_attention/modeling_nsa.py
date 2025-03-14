@@ -22,7 +22,7 @@ from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as NSAMLP
 from fla.modules import RMSNorm, RotaryEmbedding
 from native_sparse_attention.configuration_nsa import NSAConfig
-from native_sparse_attention.ops.parallel import parallel_nsa_with_compression
+from native_sparse_attention.ops.parallel import parallel_nsa
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -128,7 +128,7 @@ class NativeSparseAttention(nn.Module):
                 k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
-        o, _ = parallel_nsa_with_compression(
+        o = parallel_nsa(
             q=q,
             k=k,
             v=v,

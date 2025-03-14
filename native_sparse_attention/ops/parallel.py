@@ -2,6 +2,7 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import math
+import warnings
 from typing import Optional, Union
 
 import torch
@@ -15,6 +16,15 @@ from fla.ops.common.utils import (prepare_chunk_indices, prepare_lens,
                                   prepare_token_indices)
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
 from native_sparse_attention.ops.utils import _bitonic_merge
+
+try:
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+except ImportError:
+    warnings.warn(
+        "Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`",
+        category=ImportWarning
+    )
+    flash_attn_func = None
 
 
 @triton.heuristics({
@@ -1458,86 +1468,11 @@ def parallel_nsa(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g_slc: torch.Tensor,
-    g_swa: torch.Tensor,
-    block_indices: torch.LongTensor,
-    block_counts: Optional[Union[torch.LongTensor, int]] = None,
-    block_size: int = 64,
-    window_size: int = 0,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False
-) -> torch.Tensor:
-    r"""
-    Args:
-        q (torch.Tensor):
-            queries of shape `[B, T, HQ, K]` if `head_first=False` else `[B, HQ, T, K]`.
-        k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
-            GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16.
-        v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
-        g_slc (torch.Tensor):
-            Gate score for selected attention of shape `[B, T, HQ]` if  `head_first=False` else `[B, HQ, T]`.
-        g_swa (torch.Tensor):
-            Gate score for sliding attentionof shape `[B, T, HQ]` if  `head_first=False` else `[B, HQ, T]`.
-        block_indices (torch.LongTensor):
-            Block indices of shape `[B, T, H, S]` if `head_first=False` else `[B, H, T, S]`.
-            `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
-        block_counts (Union[torch.LongTensor, int]):
-            Number of selected blocks for each token.
-            If a tensor is provided, with shape `[B, T, H]` if `head_first=True` else `[B, T, H]`,
-            each token can select the same number of blocks.
-            If not provided, it will default to `S`, Default: `None`
-        block_size (int):
-            Selected block size. Default: 64.
-        window_size (int):
-            Sliding window size. Default: 0.
-        scale (Optional[int]):
-            Scale factor for attention scores.
-            If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-        cu_seqlens (torch.LongTensor):
-            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
-            consistent with the FlashAttention API.
-
-    Returns:
-        o (torch.Tensor):
-            Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
-    """
-    if scale is None:
-        scale = k.shape[-1] ** -0.5
-    if cu_seqlens is not None:
-        assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
-    if head_first:
-        q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, block_indices))
-        g_slc, g_swa = map(lambda x: rearrange(x, 'b h t -> b t h'), (g_slc, g_swa))
-        if isinstance(block_counts, torch.Tensor):
-            block_counts = rearrange(block_counts, 'b h t -> b t h')
-    assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
-
-    if isinstance(block_counts, int):
-        block_indices = block_indices[:, :, :, :block_counts]
-        block_counts = None
-    o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, window_size, scale, cu_seqlens)
-    if window_size > 0:
-        o = torch.addcmul(o_slc * g_slc.unsqueeze(-1), o_swa, g_swa.unsqueeze(-1))
-    else:
-        o = o_slc * g_slc.unsqueeze(-1)
-    if head_first:
-        o = rearrange(o, 'b t h d -> b h t d')
-    return o
-
-
-def parallel_nsa_with_compression(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
     g_cmp: torch.Tensor,
     g_slc: torch.Tensor,
     g_swa: torch.Tensor,
-    block_counts: Union[torch.LongTensor, int],
+    block_indices: Optional[torch.LongTensor] = None,
+    block_counts: Union[torch.LongTensor, int] = 16,
     block_size: int = 64,
     window_size: int = 0,
     scale: Optional[float] = None,
@@ -1559,10 +1494,15 @@ def parallel_nsa_with_compression(
             Gate score for selected attention of shape `[B, T, HQ]` if  `head_first=False` else `[B, HQ, T]`.
         g_swa (torch.Tensor):
             Gate score for sliding attentionof shape `[B, T, HQ]` if  `head_first=False` else `[B, HQ, T]`.
+        block_indices (torch.LongTensor):
+            Block indices of shape `[B, T, H, S]` if `head_first=False` else `[B, H, T, S]`.
+            `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
+            If `g_cmp` is provided, the passed `block_indices` will be ignored.
         block_counts (Optional[Union[torch.LongTensor, int]]):
             Number of selected blocks for each query.
             If a tensor is provided, with shape `[B, T, H]` if `head_first=False` else `[B, H, T]`,
             each query can select the same number of blocks.
+            If not provided, it will default to 16.
         block_size (int):
             Selected block size. Default: 64.
         window_size (int):
@@ -1587,7 +1527,7 @@ def parallel_nsa_with_compression(
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     if head_first:
         q, k, v = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v))
-        g_cmp, g_slc = map(lambda x: rearrange(x, 'b h t -> b t h'), (g_cmp, g_slc))
+        g_cmp, g_slc, g_swa = map(lambda x: rearrange(x, 'b h t -> b t h') if x is not None else None, (g_cmp, g_slc, g_swa))
         if not isinstance(block_counts, int):
             block_counts = rearrange(block_counts, 'b h t -> b t h')
     assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
@@ -1603,20 +1543,39 @@ def parallel_nsa_with_compression(
             scale=scale,
             offsets=cu_seqlens
         )
-    block_indices = parallel_nsa_topk(
-        q=q,
-        k=k_cmp,
-        lse=lse_cmp,
-        block_counts=block_counts,
-        block_size=block_size,
-        scale=scale,
-        offsets=cu_seqlens
-    )
-    o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, window_size, scale, cu_seqlens)
+        if block_indices is not None:
+            warnings.warn("`block_indices` will be ignored when `g_cmp` is provided")
+        block_indices = parallel_nsa_topk(
+            q=q,
+            k=k_cmp,
+            lse=lse_cmp,
+            block_counts=block_counts,
+            block_size=block_size,
+            scale=scale,
+            offsets=cu_seqlens
+        )
+    o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, 0, scale, cu_seqlens)
     o = o_slc * g_slc.unsqueeze(-1)
     if o_cmp is not None:
         o = torch.addcmul(o, o_cmp, g_cmp.unsqueeze(-1))
     if window_size > 0:
+        if cu_seqlens is not None:
+            max_seqlen = prepare_lens(cu_seqlens)
+            o = flash_attn_varlen_func(
+                q.squeeze(0), k.squeeze(0), v.squeeze(0),
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                causal=True,
+                window_size=(window_size-1, 0)
+            ).unsqueeze(0)
+        else:
+            o = flash_attn_func(
+                q, k, v,
+                causal=True,
+                window_size=(window_size-1, 0)
+            )
         o = torch.addcmul(o, o_swa, g_swa.unsqueeze(-1))
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')
