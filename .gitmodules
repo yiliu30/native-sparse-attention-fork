@@ -4,3 +4,6 @@
 [submodule "3rdparty/flame"]
 	path = 3rdparty/flame
 	url = https://github.com/fla-org/flame.git
+[submodule "3rdparty/torchtitan"]
+	path = 3rdparty/torchtitan
+	url = https://github.com/pytorch/torchtitan.git
