@@ -50,13 +50,9 @@ def test_parallel(
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-
-    perm_q = torch.randperm(T, device='cuda')
-    perm_k = torch.randperm(T, device='cuda')
-    perm_v = torch.randperm(T, device='cuda')
-    q = torch.linspace(0, 1, steps=T, dtype=dtype, device='cuda').view(1, T, 1, 1).expand(B, T, HQ, D).clone().requires_grad_(True)
-    k = torch.linspace(0, 1, steps=T, dtype=dtype, device='cuda').view(1, T, 1, 1).expand(B, T, H, D).clone().requires_grad_(True)
-    v = torch.linspace(0, 1, steps=T, dtype=dtype, device='cuda').view(1, T, 1, 1).expand(B, T, H, D).clone().requires_grad_(True)
+    q = torch.linspace(0, 1, steps=T, dtype=dtype).view(1, T, 1, 1).expand(B, T, HQ, D).clone().requires_grad_(True).cuda()
+    k = torch.linspace(0, 1, steps=T, dtype=dtype).view(1, T, 1, 1).expand(B, T, H, D).clone().requires_grad_(True).cuda()
+    v = torch.linspace(0, 1, steps=T, dtype=dtype).view(1, T, 1, 1).expand(B, T, H, D).clone().requires_grad_(True).cuda()
     g_cmp = torch.rand((B, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
     g_slc = torch.rand((B, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
     g_swa = torch.rand((B, T, HQ), dtype=dtype, device='cuda').requires_grad_(True)
