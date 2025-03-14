@@ -468,10 +468,8 @@ def parallel_nsa_fwd_kernel(
     q,
     k,
     v,
-    o_slc,
-    o_swa,
-    lse_slc,
-    lse_swa,
+    o,
+    lse,
     scale,
     block_indices,
     block_counts,
@@ -485,7 +483,6 @@ def parallel_nsa_fwd_kernel(
     V: tl.constexpr,
     S: tl.constexpr,
     BS: tl.constexpr,
-    WS: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
@@ -516,77 +513,41 @@ def parallel_nsa_fwd_kernel(
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_q = (b_q * scale).to(b_q.dtype)
 
-    p_o_slc = tl.make_block_ptr(o_slc + (bos + i_t) * HQ*V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
-    p_lse_slc = lse_slc + (bos + i_t) * HQ + i_h * G + tl.arange(0, G)
+    p_o = tl.make_block_ptr(o + (bos + i_t) * HQ*V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
+    p_lse = lse + (bos + i_t) * HQ + i_h * G + tl.arange(0, G)
     # [G, BV]
-    b_o_slc = tl.zeros([G, BV], dtype=tl.float32)
+    b_o = tl.zeros([G, BV], dtype=tl.float32)
 
-    b_m_slc = tl.full([G], float('-inf'), dtype=tl.float32)
-    b_acc_slc = tl.zeros([G], dtype=tl.float32)
+    b_m = tl.full([G], float('-inf'), dtype=tl.float32)
+    b_acc = tl.zeros([G], dtype=tl.float32)
     for i in range(NS):
         i_s = tl.load(block_indices + i).to(tl.int32) * BS
         if i_s <= i_t and i_s >= 0:
-            p_k_slc = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
-            p_v_slc = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
+            p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
+            p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
             # [BK, BS]
-            b_k_slc = tl.load(p_k_slc, boundary_check=(0, 1))
+            b_k = tl.load(p_k, boundary_check=(0, 1))
             # [BS, BV]
-            b_v_slc = tl.load(p_v_slc, boundary_check=(0, 1))
+            b_v = tl.load(p_v, boundary_check=(0, 1))
             # [G, BS]
-            b_s_slc = tl.dot(b_q, b_k_slc)
-            b_s_slc = tl.where((i_t >= (i_s + tl.arange(0, BS)))[None, :], b_s_slc, float('-inf'))
+            b_s = tl.dot(b_q, b_k)
+            b_s = tl.where((i_t >= (i_s + tl.arange(0, BS)))[None, :], b_s, float('-inf'))
 
             # [G]
-            b_m_slc, b_mp_slc = tl.maximum(b_m_slc, tl.max(b_s_slc, 1)), b_m_slc
-            b_r_slc = tl.exp(b_mp_slc - b_m_slc)
+            b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
+            b_r = tl.exp(b_mp - b_m)
             # [G, BS]
-            b_p_slc = tl.exp(b_s_slc - b_m_slc[:, None])
+            b_p = tl.exp(b_s - b_m[:, None])
             # [G]
-            b_acc_slc = b_acc_slc * b_r_slc + tl.sum(b_p_slc, 1)
+            b_acc = b_acc * b_r + tl.sum(b_p, 1)
             # [G, BV]
-            b_o_slc = b_o_slc * b_r_slc[:, None] + tl.dot(b_p_slc.to(b_q.dtype), b_v_slc)
+            b_o = b_o * b_r[:, None] + tl.dot(b_p.to(b_q.dtype), b_v)
 
-            b_mp_slc = b_m_slc
-    b_o_slc = b_o_slc / b_acc_slc[:, None]
-    b_m_slc += tl.log(b_acc_slc)
-    tl.store(p_o_slc, b_o_slc.to(p_o_slc.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_lse_slc, b_m_slc.to(p_lse_slc.dtype.element_ty))
-
-    if WS > 0:
-        p_o_swa = tl.make_block_ptr(o_swa + (bos + i_t) * HQ*V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
-        p_lse_swa = lse_swa + (bos + i_t) * HQ + i_h * G + tl.arange(0, G)
-        # [G, BV]
-        b_o_swa = tl.zeros([G, BV], dtype=tl.float32)
-
-        b_m_swa = tl.full([G], float('-inf'), dtype=tl.float32)
-        b_acc_swa = tl.zeros([G], dtype=tl.float32)
-        for i_s in range(max(0, i_t - WS + 1), i_t + 1, BS):
-            p_k_swa = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
-            p_v_swa = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
-            # [BK, BS]
-            b_k_swa = tl.load(p_k_swa, boundary_check=(0, 1))
-            # [BS, BV]
-            b_v_swa = tl.load(p_v_swa, boundary_check=(0, 1))
-            # [G, BS]
-            b_s_swa = tl.dot(b_q, b_k_swa)
-            b_s_swa = tl.where((i_t >= (i_s + tl.arange(0, BS)))[None, :], b_s_swa, float('-inf'))
-
-            # [G]
-            b_m_swa, b_mp_swa = tl.maximum(b_m_swa, tl.max(b_s_swa, 1)), b_m_swa
-            b_r_swa = tl.exp(b_mp_swa - b_m_swa)
-            # [G, BS]
-            b_p_swa = tl.exp(b_s_swa - b_m_swa[:, None])
-            # [G]
-            b_acc_swa = b_acc_swa * b_r_swa + tl.sum(b_p_swa, 1)
-            # [G, BV]
-            b_o_swa = b_o_swa * b_r_swa[:, None] + tl.dot(b_p_swa.to(b_q.dtype), b_v_swa)
-
-            b_mp_swa = b_m_swa
-        b_o_swa = b_o_swa / b_acc_swa[:, None]
-
-        b_m_swa += tl.log(b_acc_swa)
-        tl.store(p_o_swa, b_o_swa.to(p_o_swa.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_lse_swa, b_m_swa.to(p_lse_swa.dtype.element_ty))
+            b_mp = b_m
+    b_o = b_o / b_acc[:, None]
+    b_m += tl.log(b_acc)
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_lse, b_m.to(p_lse.dtype.element_ty))
 
 
 @triton.heuristics({
@@ -652,12 +613,9 @@ def parallel_nsa_bwd_kernel_dq(
     q,
     k,
     v,
-    lse_slc,
-    delta_slc,
-    do_slc,
-    lse_swa,
-    delta_swa,
-    do_swa,
+    lse,
+    delta,
+    do,
     dq,
     scale,
     block_indices,
@@ -673,7 +631,6 @@ def parallel_nsa_bwd_kernel_dq(
     V: tl.constexpr,
     S: tl.constexpr,
     BS: tl.constexpr,
-    WS: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
@@ -690,13 +647,9 @@ def parallel_nsa_bwd_kernel_dq(
         bos, eos = i_b * T, i_b * T + T
 
     q += (bos + i_t) * HQ*K
-    do_slc += (bos + i_t) * HQ*V
-    lse_slc += (bos + i_t) * HQ
-    delta_slc += (bos + i_t) * HQ
-    if WS > 0:
-        do_swa += (bos + i_t) * HQ*V
-        lse_swa += (bos + i_t) * HQ
-        delta_swa += (bos + i_t) * HQ
+    do += (bos + i_t) * HQ*V
+    lse += (bos + i_t) * HQ
+    delta += (bos + i_t) * HQ
     dq += (i_v * B * T + bos + i_t) * HQ*K
     block_indices += (bos + i_t) * H*S + i_h * S
 
@@ -715,77 +668,41 @@ def parallel_nsa_bwd_kernel_dq(
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_q = (b_q * scale).to(b_q.dtype)
 
-    p_do_slc = tl.make_block_ptr(do_slc, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
-    p_lse_slc = lse_slc + i_h * G + tl.arange(0, G)
-    p_delta_slc = delta_slc + i_h * G + tl.arange(0, G)
+    p_do = tl.make_block_ptr(do, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
+    p_lse = lse + i_h * G + tl.arange(0, G)
+    p_delta = delta + i_h * G + tl.arange(0, G)
 
     # [G, BV]
-    b_do_slc = tl.load(p_do_slc, boundary_check=(0, 1))
+    b_do = tl.load(p_do, boundary_check=(0, 1))
     # [G]
-    b_lse_slc = tl.load(p_lse_slc)
-    b_delta_slc = tl.load(p_delta_slc)
+    b_lse = tl.load(p_lse)
+    b_delta = tl.load(p_delta)
 
     # [G, BK]
-    b_dq_slc = tl.zeros([G, BK], dtype=tl.float32)
+    b_dq = tl.zeros([G, BK], dtype=tl.float32)
     for i in range(NS):
         i_s = tl.load(block_indices + i).to(tl.int32) * BS
         if i_s <= i_t and i_s >= 0:
-            p_k_slc = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
-            p_v_slc = tl.make_block_ptr(v, (V, T), (1, H*V), (i_v * BV, i_s), (BV, BS), (0, 1))
+            p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
+            p_v = tl.make_block_ptr(v, (V, T), (1, H*V), (i_v * BV, i_s), (BV, BS), (0, 1))
             # [BK, BS]
-            b_k_slc = tl.load(p_k_slc, boundary_check=(0, 1))
+            b_k = tl.load(p_k, boundary_check=(0, 1))
             # [BV, BS]
-            b_v_slc = tl.load(p_v_slc, boundary_check=(0, 1))
+            b_v = tl.load(p_v, boundary_check=(0, 1))
 
             # [G, BS]
-            b_s_slc = tl.dot(b_q, b_k_slc)
-            b_p_slc = tl.exp(b_s_slc - b_lse_slc[:, None])
-            b_p_slc = tl.where((i_t >= (i_s + tl.arange(0, BS)))[None, :], b_p_slc, 0)
+            b_s = tl.dot(b_q, b_k)
+            b_p = tl.exp(b_s - b_lse[:, None])
+            b_p = tl.where((i_t >= (i_s + tl.arange(0, BS)))[None, :], b_p, 0)
 
             # [G, BV] @ [BV, BS] -> [G, BS]
-            b_dp_slc = tl.dot(b_do_slc, b_v_slc)
-            b_ds_slc = b_p_slc * (b_dp_slc.to(tl.float32) - b_delta_slc[:, None])
+            b_dp = tl.dot(b_do, b_v)
+            b_ds = b_p * (b_dp.to(tl.float32) - b_delta[:, None])
             # [G, BS] @ [BS, BK] -> [G, BK]
-            b_dq_slc += tl.dot(b_ds_slc.to(b_k_slc.dtype), tl.trans(b_k_slc))
-    b_dq_slc *= scale
+            b_dq += tl.dot(b_ds.to(b_k.dtype), tl.trans(b_k))
+    b_dq *= scale
 
-    if WS > 0:
-        p_do_swa = tl.make_block_ptr(do_swa, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
-        p_lse_swa = lse_swa + i_h * G + tl.arange(0, G)
-        p_delta_swa = delta_swa + i_h * G + tl.arange(0, G)
-
-        # [G, BV]
-        b_do_swa = tl.load(p_do_swa, boundary_check=(0, 1))
-        # [G]
-        b_lse_swa = tl.load(p_lse_swa)
-        b_delta_swa = tl.load(p_delta_swa)
-
-        # [G, BK]
-        b_dq_swa = tl.zeros([G, BK], dtype=tl.float32)
-        for i_s in range(max(0, i_t - WS + 1), i_t + 1, BS):
-            p_k_swa = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
-            p_v_swa = tl.make_block_ptr(v, (V, T), (1, H*V), (i_v * BV, i_s), (BV, BS), (0, 1))
-            # [BK, BS]
-            b_k_swa = tl.load(p_k_swa, boundary_check=(0, 1))
-            # [BV, BS]
-            b_v_swa = tl.load(p_v_swa, boundary_check=(0, 1))
-
-            # [G, BS]
-            b_s_swa = tl.dot(b_q, b_k_swa)
-            b_p_swa = tl.exp(b_s_swa - b_lse_swa[:, None])
-            b_p_swa = tl.where((i_t >= (i_s + tl.arange(0, BS)))[None, :], b_p_swa, 0)
-
-            # [G, BV] @ [BV, BS] -> [G, BS]
-            b_dp_swa = tl.dot(b_do_swa, b_v_swa)
-            b_ds_swa = b_p_swa * (b_dp_swa.to(tl.float32) - b_delta_swa[:, None])
-            # [G, BS] @ [BS, BK] -> [G, BK]
-            b_dq_swa += tl.dot(b_ds_swa.to(b_k_swa.dtype), tl.trans(b_k_swa))
-        b_dq_swa *= scale
-
-    if WS == 0:
-        tl.store(p_dq, b_dq_slc.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
-    else:
-        tl.store(p_dq, (b_dq_slc + b_dq_swa).to(p_dq.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({
@@ -803,12 +720,9 @@ def parallel_nsa_bwd_kernel_dkv(
     q,
     k,
     v,
-    lse_slc,
-    lse_swa,
-    delta_slc,
-    delta_swa,
-    do_slc,
-    do_swa,
+    lse,
+    delta,
+    do,
     dk,
     dv,
     block_mask,
@@ -824,7 +738,6 @@ def parallel_nsa_bwd_kernel_dkv(
     V: tl.constexpr,
     M: tl.constexpr,
     BS: tl.constexpr,
-    WS: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_OFFSETS: tl.constexpr
@@ -852,62 +765,33 @@ def parallel_nsa_bwd_kernel_dkv(
     b_dv = tl.zeros([BS, BV], dtype=tl.float32)
 
     for i in range(i_s * BS, T):
-        b_m_slc = tl.load(block_mask + (bos + i) * H*M + i_h * M + i_s)
-        if b_m_slc:
+        b_m = tl.load(block_mask + (bos + i) * H*M + i_h * M + i_s)
+        if b_m:
             p_q = tl.make_block_ptr(q + (bos + i) * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
             # [G, BK]
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_q = (b_q * scale).to(b_q.dtype)
 
-            p_do_slc = tl.make_block_ptr(do_slc + (bos + i) * HQ*V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
-            p_lse_slc = lse_slc + (bos + i) * HQ + i_h * G + tl.arange(0, G)
-            p_delta_slc = delta_slc + (bos + i) * HQ + i_h * G + tl.arange(0, G)
+            p_do = tl.make_block_ptr(do + (bos + i) * HQ*V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
+            p_lse = lse + (bos + i) * HQ + i_h * G + tl.arange(0, G)
+            p_delta = delta + (bos + i) * HQ + i_h * G + tl.arange(0, G)
             # [G, BV]
-            b_do_slc = tl.load(p_do_slc, boundary_check=(0, 1))
+            b_do = tl.load(p_do, boundary_check=(0, 1))
             # [G]
-            b_lse_slc = tl.load(p_lse_slc)
-            b_delta_slc = tl.load(p_delta_slc)
+            b_lse = tl.load(p_lse)
+            b_delta = tl.load(p_delta)
             # [BS, G]
-            b_s_slc = tl.dot(b_k, tl.trans(b_q))
-            b_p_slc = tl.exp(b_s_slc - b_lse_slc[None, :])
-            b_p_slc = tl.where((i >= (i_s * BS + tl.arange(0, BS)))[:, None], b_p_slc, 0)
+            b_s = tl.dot(b_k, tl.trans(b_q))
+            b_p = tl.exp(b_s - b_lse[None, :])
+            b_p = tl.where((i >= (i_s * BS + tl.arange(0, BS)))[:, None], b_p, 0)
             # [BS, G] @ [G, BV] -> [BS, BV]
-            b_dv += tl.dot(b_p_slc.to(b_do_slc.dtype), b_do_slc)
+            b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
             # [BS, BV] @ [BV, G] -> [BS, G]
-            b_dp_slc = tl.dot(b_v, tl.trans(b_do_slc))
+            b_dp = tl.dot(b_v, tl.trans(b_do))
             # [BS, G]
-            b_ds_slc = b_p_slc * (b_dp_slc - b_delta_slc[None, :])
+            b_ds = b_p * (b_dp - b_delta[None, :])
             # [BS, G] @ [G, BK] -> [BS, BK]
-            b_dk += tl.dot(b_ds_slc.to(b_q.dtype), b_q)
-
-        if WS > 0:
-            o_s = i_s * BS + tl.arange(0, BS)
-            if max(i_s * BS, i - WS + 1) < min((i_s + 1) * BS, i + 1):
-                p_q = tl.make_block_ptr(q + (bos + i) * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
-                # [G, BK]
-                b_q = tl.load(p_q, boundary_check=(0, 1))
-                b_q = (b_q * scale).to(b_q.dtype)
-
-                p_do_swa = tl.make_block_ptr(do_swa + (bos + i) * HQ*V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
-                p_lse_swa = lse_swa + (bos + i) * HQ + i_h * G + tl.arange(0, G)
-                p_delta_swa = delta_swa + (bos + i) * HQ + i_h * G + tl.arange(0, G)
-                # [G, BV]
-                b_do_swa = tl.load(p_do_swa, boundary_check=(0, 1))
-                # [G]
-                b_lse_swa = tl.load(p_lse_swa)
-                b_delta_swa = tl.load(p_delta_swa)
-                # [BS, G]
-                b_s_swa = tl.dot(b_k, tl.trans(b_q))
-                b_p_swa = tl.exp(b_s_swa - b_lse_swa[None, :])
-                b_p_swa = tl.where((i >= o_s and (i - WS) < o_s)[:, None], b_p_swa, 0)
-                # [BS, G] @ [G, BV] -> [BS, BV]
-                b_dv += tl.dot(b_p_swa.to(b_do_swa.dtype), b_do_swa)
-                # [BS, BV] @ [BV, G] -> [BS, G]
-                b_dp_swa = tl.dot(b_v, tl.trans(b_do_swa))
-                # [BS, G]
-                b_ds_swa = b_p_swa * (b_dp_swa - b_delta_swa[None, :])
-                # [BS, G] @ [G, BK] -> [BS, BK]
-                b_dk += tl.dot(b_ds_swa.to(b_q.dtype), b_q)
+            b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
 
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
@@ -1177,7 +1061,6 @@ def parallel_nsa_fwd(
     block_indices: torch.LongTensor,
     block_counts: Union[torch.LongTensor, int],
     block_size: int,
-    window_size: int,
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
     token_indices: Optional[torch.LongTensor] = None,
@@ -1186,7 +1069,6 @@ def parallel_nsa_fwd(
     HQ = q.shape[2]
     G = HQ // H
     BS = block_size
-    WS = window_size
     if torch.cuda.get_device_capability()[0] >= 9:
         BK = min(256, triton.next_power_of_2(K))
         BV = min(256, triton.next_power_of_2(V))
@@ -1198,19 +1080,15 @@ def parallel_nsa_fwd(
     assert NK == 1, "The key dimension can not be larger than 256"
 
     grid = (T, NV, B * H)
-    o_slc = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
-    o_swa = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device) if window_size > 0 else None
-    lse_slc = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
-    lse_swa = torch.empty(B, T, HQ, dtype=torch.float, device=q.device) if window_size > 0 else None
+    o = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
+    lse = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
 
     parallel_nsa_fwd_kernel[grid](
         q=q,
         k=k,
         v=v,
-        o_slc=o_slc,
-        o_swa=o_swa,
-        lse_slc=lse_slc,
-        lse_swa=lse_swa,
+        o=o,
+        lse=lse,
         scale=scale,
         block_indices=block_indices,
         block_counts=block_counts,
@@ -1224,11 +1102,10 @@ def parallel_nsa_fwd(
         V=V,
         S=S,
         BS=BS,
-        WS=WS,
         BK=BK,
         BV=BV,
     )
-    return o_slc, lse_slc, o_swa, lse_swa
+    return o, lse
 
 
 def parallel_nsa_block_mask(
@@ -1278,16 +1155,12 @@ def parallel_nsa_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    o_slc: torch.Tensor,
-    lse_slc: torch.Tensor,
-    do_slc: torch.Tensor,
-    o_swa: torch.Tensor,
-    lse_swa: torch.Tensor,
-    do_swa: torch.Tensor,
+    o: torch.Tensor,
+    lse: torch.Tensor,
+    do: torch.Tensor,
     block_indices: torch.Tensor,
     block_counts: Union[torch.LongTensor, int],
     block_size: int = 64,
-    window_size: int = 0,
     scale: float = None,
     offsets: Optional[torch.LongTensor] = None,
     token_indices: Optional[torch.LongTensor] = None,
@@ -1296,13 +1169,11 @@ def parallel_nsa_bwd(
     HQ = q.shape[2]
     G = HQ // H
     BS = block_size
-    WS = window_size
     BK = triton.next_power_of_2(K)
     BV = min(128, triton.next_power_of_2(v.shape[-1]))
     NV = triton.cdiv(V, BV)
 
-    delta_slc = parallel_nsa_bwd_preprocess(o_slc, do_slc)
-    delta_swa = parallel_nsa_bwd_preprocess(o_swa, do_swa) if window_size > 0 else None
+    delta = parallel_nsa_bwd_preprocess(o, do)
 
     dq = torch.empty(NV, *q.shape, dtype=q.dtype if NV == 1 else torch.float, device=q.device)
     grid = (T, NV, B * H)
@@ -1310,12 +1181,9 @@ def parallel_nsa_bwd(
         q=q,
         k=k,
         v=v,
-        lse_slc=lse_slc,
-        delta_slc=delta_slc,
-        do_slc=do_slc,
-        lse_swa=lse_swa,
-        delta_swa=delta_swa,
-        do_swa=do_swa,
+        lse=lse,
+        delta=delta,
+        do=do,
         dq=dq,
         block_indices=block_indices,
         block_counts=block_counts,
@@ -1331,7 +1199,6 @@ def parallel_nsa_bwd(
         V=V,
         S=S,
         BS=BS,
-        WS=WS,
         BK=BK,
         BV=BV
     )
@@ -1354,12 +1221,9 @@ def parallel_nsa_bwd(
         q=q,
         k=k,
         v=v,
-        lse_slc=lse_slc,
-        lse_swa=lse_swa,
-        delta_slc=delta_slc,
-        delta_swa=delta_swa,
-        do_slc=do_slc,
-        do_swa=do_swa,
+        lse=lse,
+        delta=delta,
+        do=do,
         dk=dk,
         dv=dv,
         block_mask=block_mask,
@@ -1375,7 +1239,6 @@ def parallel_nsa_bwd(
         V=V,
         M=block_mask.shape[-1],
         BS=BS,
-        WS=WS,
         BK=BK,
         BV=BV
     )
@@ -1389,7 +1252,7 @@ class ParallelNSAFunction(torch.autograd.Function):
     @staticmethod
     @contiguous
     @autocast_custom_fwd
-    def forward(ctx, q, k, v, block_indices, block_counts, block_size, window_size, scale, offsets):
+    def forward(ctx, q, k, v, block_indices, block_counts, block_size, scale, offsets):
         ctx.dtype = q.dtype
 
         # 2-d sequence indices denoting the offsets of tokens in each sequence
@@ -1398,47 +1261,41 @@ class ParallelNSAFunction(torch.autograd.Function):
         # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
         token_indices = prepare_token_indices(offsets) if offsets is not None else None
 
-        o_slc, lse_slc, o_swa, lse_swa = parallel_nsa_fwd(
+        o, lse = parallel_nsa_fwd(
             q=q,
             k=k,
             v=v,
             block_indices=block_indices,
             block_counts=block_counts,
             block_size=block_size,
-            window_size=window_size,
             scale=scale,
             offsets=offsets,
             token_indices=token_indices
         )
-        ctx.save_for_backward(q, k, v, o_slc, lse_slc, o_swa, lse_swa)
+        ctx.save_for_backward(q, k, v, o, lse)
         ctx.block_indices = block_indices
         ctx.block_counts = block_counts
         ctx.offsets = offsets
         ctx.token_indices = token_indices
         ctx.block_size = block_size
-        ctx.window_size = window_size
         ctx.scale = scale
-        return o_slc.to(q.dtype), o_swa.to(q.dtype) if o_swa is not None else o_swa
+        return o.to(q.dtype)
 
     @staticmethod
     @contiguous
     @autocast_custom_bwd
-    def backward(ctx, do_slc, do_swa):
-        q, k, v, o_slc, lse_slc, o_swa, lse_swa = ctx.saved_tensors
+    def backward(ctx, do):
+        q, k, v, o, lse = ctx.saved_tensors
         dq, dk, dv = parallel_nsa_bwd(
             q=q,
             k=k,
             v=v,
-            o_slc=o_slc,
-            o_swa=o_swa,
-            lse_slc=lse_slc,
-            lse_swa=lse_swa,
-            do_slc=do_slc,
-            do_swa=do_swa,
+            o=o,
+            lse=lse,
+            do=do,
             block_indices=ctx.block_indices,
             block_counts=ctx.block_counts,
             block_size=ctx.block_size,
-            window_size=ctx.window_size,
             scale=ctx.scale,
             offsets=ctx.offsets,
             token_indices=ctx.token_indices
@@ -1554,14 +1411,14 @@ def parallel_nsa(
             scale=scale,
             offsets=cu_seqlens
         )
-    o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, 0, scale, cu_seqlens)
+    o_slc = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, scale, cu_seqlens)
     o = o_slc * g_slc.unsqueeze(-1)
     if o_cmp is not None:
         o = torch.addcmul(o, o_cmp, g_cmp.unsqueeze(-1))
     if window_size > 0:
         if cu_seqlens is not None:
             max_seqlen = prepare_lens(cu_seqlens)
-            o = flash_attn_varlen_func(
+            o_swa = flash_attn_varlen_func(
                 q.squeeze(0), k.squeeze(0), v.squeeze(0),
                 cu_seqlens_q=cu_seqlens,
                 cu_seqlens_k=cu_seqlens,
@@ -1571,7 +1428,7 @@ def parallel_nsa(
                 window_size=(window_size-1, 0)
             ).unsqueeze(0)
         else:
-            o = flash_attn_func(
+            o_swa = flash_attn_func(
                 q, k, v,
                 causal=True,
                 window_size=(window_size-1, 0)
@@ -1579,4 +1436,4 @@ def parallel_nsa(
         o = torch.addcmul(o, o_swa, g_swa.unsqueeze(-1))
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')
-    return o, block_indices
+    return o
