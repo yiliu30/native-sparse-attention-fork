@@ -26,7 +26,7 @@ To get started, clone the `native-sparse-attention` repository and install the r
 git clone https://github.com/fla-org/native-sparse-attention.git
 cd native-sparse-attention
 git submodule update --init --recursive
-pip install . 
+pip install .
 ```
 
 ## Usage
