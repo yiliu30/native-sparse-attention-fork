@@ -1,14 +1,22 @@
 # -*- coding: utf-8 -*-
 
-from .ops.naive import naive_nsa, naive_nsa_with_compression
-from .ops.parallel import parallel_nsa, parallel_nsa_with_compression
+from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
+
+from native_sparse_attention.configuration_nsa import NSAConfig
+from native_sparse_attention.modeling_nsa import NSAForCausalLM, NSAModel
+from native_sparse_attention.ops.parallel import (
+    parallel_nsa, parallel_nsa_with_compression)
+
+AutoConfig.register(NSAConfig.model_type, NSAConfig)
+AutoModel.register(NSAConfig, NSAModel)
+AutoModelForCausalLM.register(NSAConfig, NSAForCausalLM)
+
 
 __all__ = [
-    'naive_nsa',
+    'NSAConfig', 'NSAModel', 'NSAForCausalLM',
     'parallel_nsa',
-    'naive_nsa_with_compression',
     'parallel_nsa_with_compression'
 ]
 
 
-__version__ = '0.0'
+__version__ = '0.1'
