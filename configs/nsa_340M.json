@@ -1,5 +1,13 @@
 {
     "attention_bias": false,
+    "architectures": [
+        "NSAForCausalLM"
+    ],
+    "auto_map": {
+        "AutoConfig": "native_sparse_attention.NSAConfig",
+        "AutoModel": "native_sparse_attention.NSAModel",
+        "AutoModelForCausalLM": "native_sparse_attention.NSAForCausalLM"
+    },
     "bos_token_id": 1,
     "eos_token_id": 2,
     "fuse_cross_entropy": true,
@@ -8,7 +16,7 @@
     "hidden_size": 1024,
     "initializer_range": 0.006,
     "max_position_embeddings": 8192,
-    "model_type": "transformer",
+    "model_type": "nsa",
     "num_heads": 64,
     "num_kv_heads": 4,
     "block_size": 64,
