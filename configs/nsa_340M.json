@@ -1,13 +1,5 @@
 {
     "attention_bias": false,
-    "architectures": [
-        "NSAForCausalLM"
-    ],
-    "auto_map": {
-        "AutoConfig": "native_sparse_attention.NSAConfig",
-        "AutoModel": "native_sparse_attention.NSAModel",
-        "AutoModelForCausalLM": "native_sparse_attention.NSAForCausalLM"
-    },
     "bos_token_id": 1,
     "eos_token_id": 2,
     "fuse_cross_entropy": true,
@@ -28,3 +20,4 @@
     "use_cache": true,
     "vocab_size": 32000
 }
+
