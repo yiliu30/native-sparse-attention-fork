@@ -28,7 +28,7 @@ Training a 340M model:
 
 NNODE=1 NGPU=8 LOG_RANK=0 bash train.sh \
   --job.config_file train.toml \
-  --job.dump_folder exp/nsa-340M-10B/batch32.seqlen2048.warmup1024.update1.steps20480.lr3e-4 \
+  --job.dump_folder exp/nsa-340M-10B/batch8.seqlen8192.warmup1024.update1.steps20480.lr3e-4 \
   --model.config configs/nsa_340M.json \
   --model.tokenizer_path fla-hub/transformer-1.3B-100B \
   --optimizer.name AdamW \
@@ -37,8 +37,8 @@ NNODE=1 NGPU=8 LOG_RANK=0 bash train.sh \
   --lr_scheduler.warmup_steps 1024 \
   --lr_scheduler.lr_min 0.1 \
   --lr_scheduler.decay_type sqrt \
-  --training.batch_size 32 \
-  --training.seq_len 2048 \
+  --training.batch_size 8 \
+  --training.seq_len 8192 \
   --training.gradient_accumulation_steps 1 \
   --training.steps 20480 \
   --training.max_norm 1.0 \
