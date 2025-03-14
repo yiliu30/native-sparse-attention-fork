@@ -16,7 +16,7 @@ class NSAConfig(PretrainedConfig):
         num_hidden_layers: int = 24,
         num_heads: int = 64,
         num_kv_heads: int = 4,
-        head_dim: int = 64,
+        head_dim: int = 32,
         qkv_bias: bool = False,
         block_size: int = 64,
         block_counts: Optional[int] = 16,

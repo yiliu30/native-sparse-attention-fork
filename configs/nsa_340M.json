@@ -9,8 +9,9 @@
     "initializer_range": 0.006,
     "max_position_embeddings": 8192,
     "model_type": "nsa",
-    "num_heads": 64,
-    "num_kv_heads": 4,
+    "num_heads": 32,
+    "num_kv_heads": 2,
+    "head_dim": 64,
     "block_size": 64,
     "block_counts": 16,
     "window_size": 512,
@@ -20,4 +21,3 @@
     "use_cache": true,
     "vocab_size": 32000
 }
-

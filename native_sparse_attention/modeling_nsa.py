@@ -70,7 +70,7 @@ class NativeSparseAttention(nn.Module):
         self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
         self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
         self.g_proj = nn.Linear(self.hidden_size, self.num_heads * 3, bias=False)
-        self.o_proj = nn.Linear(self.kv_dim, self.hidden_size, bias=False)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
         self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
 
