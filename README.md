@@ -43,7 +43,7 @@ pytest tests/test_nsa_with_compression.py
 
 To measure the efficiency of NSA:
 ```py
-python benchmark/benchmark_nsa.py
+python benchmarks/benchmark_nsa.py
 ```
 
 To direct use our NSA kernel:
