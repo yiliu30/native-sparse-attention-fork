@@ -330,7 +330,6 @@ def parallel_nsa_compression_bwd_kernel_dkv(
 
 
 @triton.heuristics({
-    'BC2': lambda args: args['BC'] // 2,
     'USE_OFFSETS': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
@@ -358,7 +357,6 @@ def parallel_nsa_kernel_topk(
     K: tl.constexpr,
     S: tl.constexpr,
     BC: tl.constexpr,
-    BC2: tl.constexpr,
     BS: tl.constexpr,
     BK: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
@@ -428,7 +426,7 @@ def parallel_nsa_kernel_topk(
     # [BC]
     b_i = tl.full([BC], -1, dtype=tl.float32)
     o_i = tl.zeros([BC], dtype=tl.int32)
-    m_i = tl.arange(0, BC) < BC2
+    m_i = tl.arange(0, BC) < BC//2
     for i_c in range(0, i_t // BS + 1, BC):
         o_c = i_c + tl.arange(0, BC)
 
@@ -457,8 +455,8 @@ def parallel_nsa_kernel_topk(
         else:
             b_i, o_i = _bitonic_merge(b_i, o_i.to(tl.int32), n_dims, True, n_dims)
 
-    m_top = tl.arange(0, 2) == 0
-    b_top = tl.sum(m_top[:, None] * tl.reshape(o_i - 1, [2, BC2]), 0)
+    m_top = tl.arange(0, BC//S) == 0
+    b_top = tl.sum(m_top[:, None] * tl.reshape(o_i - 1, [BC//S, S]), 0)
 
     p_b = tl.make_block_ptr(block_indices + (bos + i_t) * H*S, (H*S,), (1,), (i_h * S,), (S,), (0,))
     tl.store(p_b, b_top.to(p_b.dtype.element_ty))
