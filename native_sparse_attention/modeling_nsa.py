@@ -98,7 +98,6 @@ class NativeSparseAttention(nn.Module):
         g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=3)
         g_cmp, g_slc, g_swa = g.sigmoid().unbind(-1)
 
-        # equivalent to cu_seqlens in `flash_attn`
         cu_seqlens = kwargs.get('cu_seqlens', None)
 
         seqlen_offset, max_seqlen = 0, seq_len
@@ -138,6 +137,7 @@ class NativeSparseAttention(nn.Module):
             block_size=self.block_size,
             block_counts=self.block_counts,
             window_size=self.window_size,
+            cu_seqlens=cu_seqlens,
             head_first=False
         )
         o = o.reshape(batch_size, seq_len, -1)

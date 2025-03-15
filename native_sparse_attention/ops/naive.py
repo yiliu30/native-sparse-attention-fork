@@ -5,9 +5,25 @@ import math
 from typing import Optional, Union
 
 import torch
+import torch.nn.functional as F
 from einops import rearrange, repeat
 
-from native_sparse_attention.ops.parallel import compression
+
+@torch.compile
+def compression(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    block_size: int
+) -> torch.Tensor:
+    # Currently, we set mean pooling as our basic compression function.
+    B, T, H = k.shape[:3]
+    num_block = math.ceil(T / block_size)
+    if k.shape[1] % block_size != 0:
+        k = F.pad(k, (0, 0, 0, 0, 0, num_block * block_size - T))
+        v = F.pad(v, (0, 0, 0, 0, 0, num_block * block_size - T))
+    k_cmp = k.view(B, num_block, block_size, H, -1).mean(dim=2)
+    v_cmp = v.view(B, num_block, block_size, H, -1).mean(dim=2)
+    return k_cmp, v_cmp
 
 
 def naive_nsa(

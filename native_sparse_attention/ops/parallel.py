@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-import math
 import warnings
 from typing import Optional, Union
 
 import torch
-import torch.nn.functional as F
 import triton
 import triton.language as tl
 import triton.language.core as core
@@ -14,6 +12,7 @@ from einops import rearrange
 
 from fla.ops.common.utils import (prepare_chunk_indices, prepare_chunk_offsets,
                                   prepare_lens, prepare_token_indices)
+from fla.ops.utils import mean_pooling
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
 from native_sparse_attention.ops.utils import _bitonic_merge
 
@@ -812,23 +811,6 @@ def parallel_nsa_bwd_kernel_dkv(
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
 
-@torch.compile
-def compression(
-    k: torch.Tensor,
-    v: torch.Tensor,
-    block_size: int
-) -> torch.Tensor:
-    # Currently, we set mean pooling as our basic compression function.
-    B, T, H = k.shape[:3]
-    num_block = math.ceil(T / block_size)
-    if k.shape[1] % block_size != 0:
-        k = F.pad(k, (0, 0, 0, 0, 0, num_block * block_size - T))
-        v = F.pad(v, (0, 0, 0, 0, 0, num_block * block_size - T))
-    k_cmp = k.view(B, num_block, block_size, H, -1).mean(dim=2)
-    v_cmp = v.view(B, num_block, block_size, H, -1).mean(dim=2)
-    return k_cmp, v_cmp
-
-
 def parallel_nsa_compression_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1411,7 +1393,7 @@ def parallel_nsa(
             block_counts = rearrange(block_counts, 'b h t -> b t h')
     assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
 
-    k_cmp, v_cmp = compression(k, v, block_size)
+    k_cmp, v_cmp = mean_pooling(k, block_size, cu_seqlens), mean_pooling(v, block_size, cu_seqlens)
     o_cmp, lse_cmp = None, None
     if g_cmp is not None:
         o_cmp, lse_cmp = parallel_nsa_compression(
@@ -1439,7 +1421,7 @@ def parallel_nsa(
         o = torch.addcmul(o, o_cmp, g_cmp.unsqueeze(-1))
     if window_size > 0:
         if cu_seqlens is not None:
-            max_seqlen = prepare_lens(cu_seqlens)
+            max_seqlen = q.shape[1]
             o_swa = flash_attn_varlen_func(
                 q.squeeze(0), k.squeeze(0), v.squeeze(0),
                 cu_seqlens_q=cu_seqlens,
