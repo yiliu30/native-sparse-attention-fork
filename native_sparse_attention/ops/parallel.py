@@ -32,8 +32,9 @@ except ImportError:
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4]
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [1, 2, 4, 8]
+        for num_stages in [2, 3, 4, 5]
     ],
     key=['BS', 'BK', 'BV'],
 )
@@ -131,8 +132,9 @@ def parallel_nsa_compression_fwd_kernel(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
+        for num_stages in [2, 3, 4, 5]
     ],
     key=['BS', 'BK', 'BV'],
 )
@@ -327,8 +329,9 @@ def parallel_nsa_compression_bwd_kernel_dkv(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4]
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [1, 2, 4, 8]
+        for num_stages in [2, 3, 4, 5]
     ],
     key=['BS', 'BK'],
 )
@@ -603,8 +606,9 @@ def parallel_nsa_bwd_kernel_preprocess(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
+        for num_stages in [2, 3, 4, 5]
     ],
     key=['BS', 'BK', 'BV'],
 )
@@ -710,8 +714,9 @@ def parallel_nsa_bwd_kernel_dq(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
+        for num_stages in [2, 3, 4, 5]
     ],
     key=['BS', 'BK', 'BV'],
 )
@@ -1030,7 +1035,7 @@ def parallel_nsa_topk(
     BC = BS = block_size
     BK = triton.next_power_of_2(K)
 
-    block_indices = torch.zeros(B, T, H, S, dtype=torch.long, device=q.device)
+    block_indices = torch.zeros(B, T, H, S, dtype=torch.int32, device=q.device)
     token_indices = prepare_token_indices(offsets) if offsets is not None else None
     grid = (T, B * H)
     parallel_nsa_kernel_topk[grid](
