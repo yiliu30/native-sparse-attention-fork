@@ -14,9 +14,10 @@ Efficient Triton implementations for [Native Sparse Attention: Hardware-Aligned 
 
 ## News
 
-- [2025/02/25] Introduced an online top‑k selection kernel that avoids materializing the attention matrix during selection.
-- [2025/02/24] Added support for a fused Triton kernel combining selected attention with sliding attention.
-- [2025/02/21] Enabled handling of a variable number of selected blocks for queries across different positions and batches.
+- [2025-03-15] We now add full support for NSA training with `flame`.
+- [2025-02-25] Introduce an online top‑k selection kernel that avoids materializing the attention matrix during selection.
+- [2025-02-24] Add support for a fused Triton kernel combining selected attention with sliding attention.
+- [2025-02-21] Enable handling of a variable number of selected blocks for queries across different positions and batches.
 
 ### Setup
 
