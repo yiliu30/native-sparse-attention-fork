@@ -12,8 +12,8 @@ import triton.language as tl
 import triton.language.core as core
 from einops import rearrange
 
-from fla.ops.common.utils import (prepare_chunk_indices, prepare_lens,
-                                  prepare_token_indices)
+from fla.ops.common.utils import (prepare_chunk_indices, prepare_chunk_offsets,
+                                  prepare_lens, prepare_token_indices)
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
 from native_sparse_attention.ops.utils import _bitonic_merge
 
@@ -48,6 +48,7 @@ def parallel_nsa_compression_fwd_kernel(
     scale,
     offsets,
     token_indices,
+    chunk_offsets,
     T,
     H: tl.constexpr,
     HQ: tl.constexpr,
@@ -67,8 +68,10 @@ def parallel_nsa_compression_fwd_kernel(
         i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
+        boc = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
+        boc = i_b * tl.cdiv(T, BS)
 
     p_q = tl.make_block_ptr(q + (bos + i_t) * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
 
@@ -94,8 +97,8 @@ def parallel_nsa_compression_fwd_kernel(
     for i_c in range(0, NC, BC):
         o_c = i_c + tl.arange(0, BC)
 
-        p_k = tl.make_block_ptr(k + (tl.cdiv(bos, BS) * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
-        p_v = tl.make_block_ptr(v + (tl.cdiv(bos, BS) * H + i_h) * V, (TC, V), (H*V, 1), (i_c, i_v * BV), (BC, BV), (1, 0))
+        p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
+        p_v = tl.make_block_ptr(v + (boc * H + i_h) * V, (TC, V), (H*V, 1), (i_c, i_v * BV), (BC, BV), (1, 0))
         # [BK, BC]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [BC, BV]
@@ -150,6 +153,7 @@ def parallel_nsa_compression_bwd_kernel_dq(
     scale,
     offsets,
     token_indices,
+    chunk_offsets,
     T,
     B: tl.constexpr,
     H: tl.constexpr,
@@ -170,8 +174,10 @@ def parallel_nsa_compression_bwd_kernel_dq(
         i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
+        boc = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
+        boc = i_b * tl.cdiv(T, BS)
 
     q += (bos + i_t) * HQ*K
     do += (bos + i_t) * HQ*V
@@ -206,8 +212,8 @@ def parallel_nsa_compression_bwd_kernel_dq(
     b_dq = tl.zeros([G, BK], dtype=tl.float32)
     for i_c in range(0, NC, BC):
         o_c = i_c + tl.arange(0, BC)
-        p_k = tl.make_block_ptr(k + (tl.cdiv(bos, BS) * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
-        p_v = tl.make_block_ptr(v + (tl.cdiv(bos, BS) * H + i_h) * V, (V, TC), (1, H*V), (i_v * BV, i_c), (BV, BC), (0, 1))
+        p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
+        p_v = tl.make_block_ptr(v + (boc * H + i_h) * V, (V, TC), (1, H*V), (i_v * BV, i_c), (BV, BC), (0, 1))
         # [BK, BC]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [BV, BC]
@@ -249,6 +255,7 @@ def parallel_nsa_compression_bwd_kernel_dkv(
     dv,
     offsets,
     chunk_indices,
+    chunk_offsets,
     scale,
     T,
     B: tl.constexpr,
@@ -270,18 +277,18 @@ def parallel_nsa_compression_bwd_kernel_dkv(
         i_n, i_c = tl.load(chunk_indices + i_c * 2).to(tl.int32), tl.load(chunk_indices + i_c * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
+        boc = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
+        boc = i_b * tl.cdiv(T, BS)
 
     # the number of compression representations in total
     TC = tl.cdiv(T, BS)
 
-    p_k = tl.make_block_ptr(k + (tl.cdiv(bos, BS) * H + i_h) * K, (TC, K), (H*K, 1), (i_c * BC, 0), (BC, BK), (1, 0))
-    p_v = tl.make_block_ptr(v + (tl.cdiv(bos, BS) * H + i_h) * V, (TC, V), (H*V, 1), (i_c * BC, i_v * BV), (BC, BV), (1, 0))
-    p_dk = tl.make_block_ptr(dk + (i_v * B*T*H + tl.cdiv(bos, BS) * H + i_h) * K,
-                             (TC, K), (H*K, 1), (i_c * BC, 0), (BC, BK), (1, 0))
-    p_dv = tl.make_block_ptr(dv + (i_v * B*T*H + tl.cdiv(bos, BS) * H + i_h) * V,
-                             (TC, V), (H*V, 1), (i_c * BC, i_v * BV), (BC, BV), (1, 0))
+    p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (TC, K), (H*K, 1), (i_c * BC, 0), (BC, BK), (1, 0))
+    p_v = tl.make_block_ptr(v + (boc * H + i_h) * V, (TC, V), (H*V, 1), (i_c * BC, i_v * BV), (BC, BV), (1, 0))
+    p_dk = tl.make_block_ptr(dk + (i_v * B*T*H + boc * H + i_h) * K, (TC, K), (H*K, 1), (i_c * BC, 0), (BC, BK), (1, 0))
+    p_dv = tl.make_block_ptr(dv + (i_v * B*T*H + boc * H + i_h) * V, (TC, V), (H*V, 1), (i_c * BC, i_v * BV), (BC, BV), (1, 0))
 
     # [BC, BK]
     b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -344,6 +351,7 @@ def parallel_nsa_kernel_topk(
     block_indices,
     offsets,
     token_indices,
+    chunk_offsets,
     T,
     H: tl.constexpr,
     HQ: tl.constexpr,
@@ -363,8 +371,10 @@ def parallel_nsa_kernel_topk(
         i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
+        boc = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
+        boc = i_b * tl.cdiv(T, BS)
 
     p_q = tl.make_block_ptr(q + (bos + i_t) * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
 
@@ -382,7 +392,7 @@ def parallel_nsa_kernel_topk(
     # 1. lse computation
     ################################
     if lse is not None:
-        b_lse = tl.load(lse + (tl.cdiv(bos, BS) + i_t) * HQ + i_h * G + tl.arange(0, G))
+        b_lse = tl.load(lse + (bos + i_t) * HQ + i_h * G + tl.arange(0, G))
     else:
         # max scores for the current block
         b_m = tl.full([G], float('-inf'), dtype=tl.float32)
@@ -391,7 +401,7 @@ def parallel_nsa_kernel_topk(
         for i_c in range(0, NC, BC):
             o_c = i_c + tl.arange(0, BC)
 
-            p_k = tl.make_block_ptr(k + (tl.cdiv(bos, BS) * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
+            p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
             # [BK, BC]
             b_k = tl.load(p_k, boundary_check=(0, 1))
 
@@ -423,7 +433,7 @@ def parallel_nsa_kernel_topk(
     for i_c in range(0, i_t // BS + 1, BC):
         o_c = i_c + tl.arange(0, BC)
 
-        p_k = tl.make_block_ptr(k + (tl.cdiv(bos, BS) * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
+        p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
         # [BK, BC]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [G, BC]
@@ -842,6 +852,8 @@ def parallel_nsa_compression_fwd(
     NV = triton.cdiv(V, BV)
     assert NK == 1, "The key dimension can not be larger than 256"
 
+    chunk_offsets = prepare_chunk_offsets(offsets, BS) if offsets is not None else None
+
     grid = (T, NV, B * H)
     o = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
     lse = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
@@ -855,6 +867,7 @@ def parallel_nsa_compression_fwd(
         scale=scale,
         offsets=offsets,
         token_indices=token_indices,
+        chunk_offsets=chunk_offsets,
         T=T,
         H=H,
         HQ=HQ,
@@ -888,6 +901,15 @@ def parallel_nsa_compression_bwd(
     BK = triton.next_power_of_2(K)
     BV = min(128, triton.next_power_of_2(v.shape[-1]))
     NV = triton.cdiv(V, BV)
+    if offsets is not None:
+        lens = prepare_lens(offsets)
+        chunk_indices = torch.cat([torch.arange(n) for n in triton.cdiv(triton.cdiv(lens, BS), BC).tolist()])
+        chunk_indices = torch.stack([chunk_indices.eq(0).cumsum(0) - 1, chunk_indices], 1).to(offsets)
+        chunk_offsets = prepare_chunk_offsets(offsets, BS)
+        NC = len(chunk_indices)
+    else:
+        chunk_indices, chunk_offsets = None, None
+        NC = triton.cdiv(triton.cdiv(T, BS), BC)
 
     delta = parallel_nsa_bwd_preprocess(o, do)
 
@@ -904,6 +926,7 @@ def parallel_nsa_compression_bwd(
         scale=scale,
         offsets=offsets,
         token_indices=token_indices,
+        chunk_offsets=chunk_offsets,
         T=T,
         B=B,
         H=H,
@@ -917,15 +940,6 @@ def parallel_nsa_compression_bwd(
         BV=BV
     )
     dq = dq.sum(0)
-
-    if offsets is not None:
-        lens = prepare_lens(offsets)
-        chunk_indices = torch.cat([torch.arange(n) for n in triton.cdiv(triton.cdiv(lens, BS), BC).tolist()])
-        chunk_indices = torch.stack([chunk_indices.eq(0).cumsum(0) - 1, chunk_indices], 1).to(offsets)
-        NC = len(chunk_indices)
-    else:
-        chunk_indices = None
-        NC = triton.cdiv(triton.cdiv(T, BS), BC)
 
     dk = torch.empty(NV, *k.shape, dtype=k.dtype if NV == 1 else torch.float, device=q.device)
     dv = torch.empty(v.shape, dtype=v.dtype, device=q.device)
@@ -942,6 +956,7 @@ def parallel_nsa_compression_bwd(
         dv=dv,
         offsets=offsets,
         chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
         scale=scale,
         T=T,
         B=B,
@@ -1037,6 +1052,7 @@ def parallel_nsa_topk(
 
     block_indices = torch.zeros(B, T, H, S, dtype=torch.int32, device=q.device)
     token_indices = prepare_token_indices(offsets) if offsets is not None else None
+    chunk_offsets = prepare_chunk_offsets(offsets, BS) if offsets is not None else None
     grid = (T, B * H)
     parallel_nsa_kernel_topk[grid](
         q=q,
@@ -1046,6 +1062,7 @@ def parallel_nsa_topk(
         block_indices=block_indices,
         offsets=offsets,
         token_indices=token_indices,
+        chunk_offsets=chunk_offsets,
         T=T,
         H=H,
         HQ=HQ,
