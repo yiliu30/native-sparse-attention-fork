@@ -15,20 +15,15 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.ft import FTParallelDims, init_ft_manager
 from torchtitan.components.loss import cross_entropy_loss
-from torchtitan.components.metrics import (_build_metric_logger,
-                                           build_device_memory_monitor,
-                                           ensure_pp_loss_visible)
-from torchtitan.components.optimizer import (build_lr_schedulers,
-                                             build_optimizers)
+from torchtitan.components.metrics import _build_metric_logger, build_device_memory_monitor, ensure_pp_loss_visible
+from torchtitan.components.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
-from torchtitan.protocols.train_spec import (TrainSpec, get_train_spec,
-                                             register_train_spec)
+from torchtitan.protocols.train_spec import TrainSpec, get_train_spec, register_train_spec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
-from torchtitan.tools.profiling import (maybe_enable_memory_snapshot,
-                                        maybe_enable_profiling)
+from torchtitan.tools.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 import native_sparse_attention  # noqa

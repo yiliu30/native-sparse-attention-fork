@@ -11,8 +11,7 @@ import torch.nn as nn
 import torch.utils.checkpoint
 from einops import rearrange
 from transformers.generation import GenerationMixin
-from transformers.modeling_outputs import (BaseModelOutputWithPast,
-                                           CausalLMOutputWithPast)
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
