@@ -1,0 +1,1 @@
+(ao) yliu7@mlp-dgx-01:ds-nas$  pytest tests/test_nsa.py -k test_parallel_n

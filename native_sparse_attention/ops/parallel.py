@@ -1320,7 +1320,7 @@ def parallel_nsa(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g_cmp: torch.Tensor,
+    
     g_slc: torch.Tensor,
     g_swa: torch.Tensor,
     block_indices: Optional[torch.LongTensor] = None,
@@ -1329,7 +1329,8 @@ def parallel_nsa(
     window_size: int = 0,
     scale: Optional[float] = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False
+    head_first: bool = False,
+    g_cmp: torch.Tensor = None,
 ) -> torch.Tensor:
     r"""
     Args:

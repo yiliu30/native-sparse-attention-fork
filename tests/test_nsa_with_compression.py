@@ -35,7 +35,7 @@ def assert_close(prefix, ref, tri, ratio):
 @pytest.mark.parametrize("window_size", [0, 32])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("scale", [0.1])
-def test_parallel(
+def test_parallel_n(
     B: int,
     H: int,
     HQ: int,

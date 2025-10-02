@@ -16,8 +16,6 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.5",
-    "transformers>=4.45.0",
     "triton>=3.0",
     "datasets>=3.3.0",
     "einops",
@@ -32,7 +30,7 @@ dev = ["pytest"]
 Homepage = "https://github.com/fla-org/native-sparse-attention"
 
 [build-system]
-requires = ["setuptools>=45", "wheel", "ninja", "torch"]
+requires = ["setuptools>=45", "wheel", "ninja"]
 build-backend = "setuptools.build_meta"
 
 [tool.isort]
